@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+    <meta charset="UTF-8">
+    <title>Untitled</title>
+    <link rel="stylesheet" href="./style.css">
+
+  </head>
+    
+  <body>
+  <html lang="pt">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>DC Space Control</title>
+
+    <!-- Supabase SDK (necessário para window.supabase existir) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  </head>
+
+  <body>
+    <!-- AUTH overlay -->
+    <section id="authScreen" class="auth-overlay hidden" aria-hidden="true">
+      <div class="auth-card">
+        <div class="row" style="justify-content: space-between; gap: 10px">
+          <div class="row" style="gap: 10px">
+            <div class="logo">DC</div>
+            <div>
+              <p class="auth-title">Entrar na empresa</p>
+              <p class="auth-sub">Email + senha + código da empresa</p>
+            </div>
+          </div>
+          <!-- ✅ removi btnLogout daqui para não duplicar e não confundir -->
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div class="grid" style="gap: 10px">
+          <div>
+            <label for="authEmail">Email</label>
+            <input id="authEmail" class="input" type="email" placeholder="ex: nome@empresa.com" />
+          </div>
+
+          <div>
+            <label for="authPass">Senha</label>
+            <input id="authPass" class="input" type="password" placeholder="••••••••" />
+          </div>
+
+          <div>
+            <label for="authCode">Código da empresa</label>
+            <input id="authCode" class="input" type="text" placeholder="ex: XHUB2026" />
+          </div>
+
+          <div class="row" style="gap: 10px; margin-top: 6px">
+            <button id="btnLogin" class="btn primary" type="button" style="flex: 1">Login</button>
+            <button id="btnSignup" class="btn" type="button" style="flex: 1">Criar conta</button>
+          </div>
+
+          <p id="authMsg" class="muted" style="margin: 8px 0 0">—</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- APP -->
+    <div id="appRoot">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">DC</div>
+          <div class="brand-txt">
+            <div class="title">Space Control</div>
+            <div class="subtitle" id="dbUpdated">Atualizado: —</div>
+          </div>
+        </div>
+
+        <div class="menu">
+          <button class="m-item active" data-go="dash" type="button">
+            <span class="m-left"><span class="ico">🏠</span> Dashboard</span>
+            <span class="ico">›</span>
+          </button>
+
+          <button class="m-item" data-go="bookings" type="button">
+            <span class="m-left"><span class="ico">📅</span> Reservas</span>
+            <span class="ico">›</span>
+          </button>
+
+          <button class="m-item" data-go="cowork" type="button">
+            <span class="m-left"><span class="ico">👥</span> Cowork</span>
+            <span class="ico">›</span>
+          </button>
+
+          <button class="m-item" data-go="reports" type="button">
+            <span class="m-left"><span class="ico">📊</span> Relatórios</span>
+            <span class="ico">›</span>
+          </button>
+        </div>
+
+        <div style="height: 14px"></div>
+
+        <div class="card">
+          <div class="row" style="justify-content: space-between">
+            <span class="pill" id="nowLabel">Agora: —</span>
+            <span class="pill" id="dashUpdated">Atualizado: —</span>
+          </div>
+
+          <div style="height: 10px"></div>
+
+          <div class="row" style="gap: 8px">
+            <button class="btn sm" id="btnBackup" type="button">Backup</button>
+            <button class="btn sm danger" id="btnFactoryReset" type="button">Reset</button>
+          </div>
+
+          <div style="height: 10px"></div>
+
+          <!-- ✅ BOTÃO SAIR ÚNICO (sem duplicar ID) -->
+          <button id="btnLogout" class="btn sm" type="button" style="width: 100%; display: none">
+            ⎋ Sair
+          </button>
+
+          <p class="muted" style="margin: 10px 0 0">Backup/exportação é local (navegador).</p>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <!-- DASH -->
+        <section class="card screen" id="scr-dash">
+          <div class="topline">
+            <h2 style="margin: 0">Dashboard</h2>
+            <div class="row" style="gap: 8px">
+              <button class="btn sm" data-rep="today" type="button">Hoje</button>
+              <button class="btn sm" data-rep="week" type="button">Semana</button>
+              <button class="btn sm" data-rep="month" type="button">Mês</button>
+            </div>
+          </div>
+
+          <div class="grid cols2">
+            <div class="card">
+              <h3>Cowork</h3>
+              <div class="row">
+                <span class="badge ok" id="cwOcc">—/—</span>
+                <span class="muted" id="cwFree">—</span>
+              </div>
+              <div style="height: 8px"></div>
+              <p class="muted" id="cwRevenue">Receita mensal ativa: —</p>
+            </div>
+
+            <div class="card">
+              <h3>Salas agora</h3>
+<div class="grid" style="gap:10px; margin-top:6px;">
+  <div class="row" style="justify-content:space-between; gap:10px;">
+    <span class="muted" style="font-weight:700;">Sala de Reuniões</span>
+    <span class="status" id="meetStatus">—</span>
+  </div>
+
+  <div class="row" style="justify-content:space-between; gap:10px;">
+    <span class="muted" style="font-weight:700;">Estúdio</span>
+    <span class="status" id="studioStatus">—</span>
+  </div>
+</div>
+
+              <div style="height: 8px"></div>
+              <p class="muted" id="meetNow">—</p>
+              <p class="muted" id="studioNow" style="margin-top: 6px">—</p>
+              <div style="height: 8px"></div>
+              <p class="muted" id="meetNext">—</p>
+              <p class="muted" id="studioNext" style="margin-top: 6px">—</p>
+            </div>
+          </div>
+
+          <div style="height: 12px"></div>
+
+          <div class="card">
+            <div class="row" style="justify-content: space-between">
+              <h3 style="margin: 0">Resumo</h3>
+              <span class="badge ok" id="repTotal">—</span>
+            </div>
+            <p class="muted" id="repMeta" style="margin: 8px 0 0">—</p>
+          </div>
+
+          <div style="height: 12px"></div>
+
+          <div class="card">
+            <div class="row" style="justify-content: space-between">
+              <h3 style="margin: 0">Hoje</h3>
+              <span class="pill" id="todayMeta">—</span>
+            </div>
+            <p class="muted" id="todayMsg" style="margin: 8px 0 0">—</p>
+            <div id="todayList"></div>
+          </div>
+        </section>
+
+        <!-- BOOKINGS -->
+        <section class="card screen" id="scr-bookings" hidden>
+          <div class="topline">
+            <h2 style="margin: 0">Reservas</h2>
+            <button class="btn primary" id="btnOpenBooking" type="button">Nova reserva</button>
+          </div>
+
+          <div class="grid cols2">
+            <div>
+              <label for="bkDay">Dia</label>
+              <input id="bkDay" class="input" type="date" />
+            </div>
+
+            <div class="row" style="gap: 10px">
+              <div style="flex: 1">
+                <label for="bkFilterResource">Recurso</label>
+                <select id="bkFilterResource"></select>
+              </div>
+              <div style="flex: 1">
+                <label for="bkFilterStatus">Status</label>
+                <select id="bkFilterStatus">
+                  <option value="all">Todos</option>
+                  <option value="confirmed">confirmed</option>
+                  <option value="pending">pending</option>
+                  <option value="cancelled">cancelled</option>
+                  <option value="checked_in">checked_in</option>
+                  <option value="checked_out">checked_out</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style="height: 10px"></div>
+
+          <div>
+            <label for="bkSearch">Pesquisar cliente</label>
+            <input id="bkSearch" class="input" type="text" placeholder="ex: Vodacom / Ana / Empresa..." />
+          </div>
+
+          <p class="muted" id="bookingsMsg" style="margin: 10px 0 0">—</p>
+          <div id="bookingsList"></div>
+        </section>
+
+        <!-- COWORK -->
+        <section class="card screen" id="scr-cowork" hidden>
+          <div class="topline">
+            <h2 style="margin: 0">Cowork</h2>
+            <button class="btn primary" id="btnAddMember" type="button">Adicionar mensalista</button>
+          </div>
+
+          <div class="grid cols2">
+            <div class="card">
+              <h3>Configuração</h3>
+              <div class="grid cols2">
+                <div>
+                  <label for="cwCapacity">Capacidade</label>
+                  <input id="cwCapacity" class="input" type="number" min="0" />
+                </div>
+                <div style="display: flex; align-items: end">
+                  <button class="btn" id="btnSaveCowork" type="button" style="width: 100%">Guardar capacidade</button>
+                </div>
+              </div>
+
+              <div style="height: 10px"></div>
+
+              <div class="grid cols2">
+                <div>
+                  <label for="cwPriceMonth">Preço mensal</label>
+                  <input id="cwPriceMonth" class="input" type="number" min="0" />
+                </div>
+                <div>
+                  <label for="cwPriceDay">Preço diária</label>
+                  <input id="cwPriceDay" class="input" type="number" min="0" />
+                </div>
+              </div>
+
+              <div style="height: 10px"></div>
+
+              <button class="btn" id="btnSaveCoworkPrices" type="button" style="width: 100%">Guardar preços</button>
+              <p class="muted" id="cwMsg" style="margin: 10px 0 0">—</p>
+            </div>
+
+            <div class="card">
+              <h3>Mensalistas</h3>
+              <p class="muted" id="membersMsg" style="margin: 0">—</p>
+              <div id="membersList"></div>
+            </div>
+          </div>
+
+          <div style="height: 12px"></div>
+
+          <div class="card">
+            <h3>Diárias</h3>
+
+            <div class="grid cols2">
+              <div>
+                <label for="cwDayDate">Data</label>
+                <input id="cwDayDate" class="input" type="date" />
+              </div>
+              <div>
+                <label for="cwDayName">Nome/Empresa</label>
+                <input id="cwDayName" class="input" type="text" placeholder="ex: Cliente X" />
+              </div>
+            </div>
+
+            <div style="height: 10px"></div>
+
+            <div class="grid cols2">
+              <div>
+                <label for="cwDaySeats">Lugares</label>
+                <input id="cwDaySeats" class="input" type="number" min="1" value="1" />
+              </div>
+              <div>
+                <label for="cwDayPrice">Preço (opcional)</label>
+                <input id="cwDayPrice" class="input" type="number" min="0" placeholder="deixe vazio para usar padrão" />
+              </div>
+            </div>
+
+            <div style="height: 10px"></div>
+
+            <div>
+              <label for="cwDayNote">Nota (opcional)</label>
+              <input id="cwDayNote" class="input" type="text" placeholder="ex: 1h, meio período, promo..." />
+            </div>
+
+            <div style="height: 10px"></div>
+
+            <button class="btn primary" id="btnAddCoworkDay" type="button" style="width: 100%">
+              Adicionar diária
+            </button>
+            <p class="muted" id="cwDayMsg" style="margin: 10px 0 0">—</p>
+            <div id="cwDayList"></div>
+          </div>
+        </section>
+
+        <!-- REPORTS -->
+        <section class="card screen" id="scr-reports" hidden>
+          <div class="topline">
+            <h2 style="margin: 0">Relatórios</h2>
+            <div class="row" style="gap: 8px">
+              <button class="btn" id="btnRunReports" type="button">Gerar</button>
+              <button class="btn" id="btnExportCSV" type="button">Exportar CSV</button>
+            </div>
+          </div>
+
+          <div class="grid cols2">
+            <div>
+              <label for="repFrom">De</label>
+              <input id="repFrom" class="input" type="date" />
+            </div>
+            <div>
+              <label for="repTo">Até</label>
+              <input id="repTo" class="input" type="date" />
+            </div>
+          </div>
+
+          <div style="height: 10px"></div>
+
+          <div>
+            <label for="repResource">Recurso</label>
+            <select id="repResource"></select>
+          </div>
+
+          <div style="height: 12px"></div>
+
+          <div class="card">
+            <div class="row" style="justify-content: space-between">
+              <h3 style="margin: 0">Total</h3>
+              <span class="badge ok" id="repTotal2">—</span>
+            </div>
+            <p class="muted" id="repMeta2" style="margin: 8px 0 0">—</p>
+          </div>
+
+          <p class="muted" id="reportsMsg" style="margin: 10px 0 0">—</p>
+          <div id="reportsList"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- MODAL: Booking -->
+    <div class="modal" id="bookingModal">
+      <div class="modal-card">
+        <div class="row" style="justify-content: space-between; align-items: center">
+          <h3 id="bkModalTitle" style="margin: 0">Reserva</h3>
+          <button class="btn sm" id="btnCloseBooking" type="button">✕</button>
+        </div>
+
+        <input id="bkId" type="hidden" />
+
+        <div style="height: 10px"></div>
+
+        <div>
+          <label for="bkResource">Recurso</label>
+          <select id="bkResource"></select>
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div>
+          <label for="bkClient">Cliente</label>
+          <input id="bkClient" class="input" type="text" placeholder="Nome do cliente" />
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div class="grid cols2">
+          <div>
+            <label for="bkStart">Início</label>
+            <input id="bkStart" class="input" type="datetime-local" />
+          </div>
+          <div>
+            <label for="bkEnd">Fim</label>
+            <input id="bkEnd" class="input" type="datetime-local" />
+          </div>
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div class="grid cols2">
+          <div>
+            <label for="bkStatus">Status</label>
+            <select id="bkStatus">
+              <option value="confirmed">confirmed</option>
+              <option value="pending">pending</option>
+              <option value="cancelled">cancelled</option>
+              <option value="checked_in">checked_in</option>
+              <option value="checked_out">checked_out</option>
+            </select>
+          </div>
+          <div>
+            <label for="bkPrice">Preço</label>
+            <input id="bkPrice" class="input" type="number" min="0" />
+          </div>
+        </div>
+
+        <p class="muted" id="bkMsg" style="margin: 10px 0 0">—</p>
+
+        <div class="row" style="gap: 10px; margin-top: 12px">
+          <button class="btn primary" id="btnSaveBooking" type="button" style="flex: 1">Guardar</button>
+          <button class="btn danger" id="btnDeleteBooking" type="button" style="flex: 1; display: none">Apagar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: Member -->
+    <div class="modal" id="memberModal">
+      <div class="modal-card">
+        <div class="row" style="justify-content: space-between; align-items: center">
+          <h3 style="margin: 0">Novo mensalista</h3>
+          <button class="btn sm" id="btnCloseMember" type="button">✕</button>
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div>
+          <label for="mName">Nome/Empresa</label>
+          <input id="mName" class="input" type="text" />
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div class="grid cols2">
+          <div>
+            <label for="mSeats">Lugares</label>
+            <input id="mSeats" class="input" type="number" min="1" value="1" />
+          </div>
+          <div>
+            <label for="mPrice">Preço/mês</label>
+            <input id="mPrice" class="input" type="number" min="0" />
+          </div>
+        </div>
+
+        <div style="height: 10px"></div>
+
+        <div>
+          <label for="mActive">Ativo?</label>
+          <select id="mActive">
+            <option value="true">Sim</option>
+            <option value="false">Não</option>
+          </select>
+        </div>
+
+        <p class="muted" id="mMsg" style="margin: 10px 0 0">—</p>
+
+        <div class="row" style="gap: 10px; margin-top: 12px">
+          <button class="btn primary" id="btnSaveMember" type="button" style="flex: 1">Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ✅ JS (cola o teu JS completo aqui OU no painel JS do CodePen) -->
+    <!-- Se estiveres no CodePen, NÃO precisas deste <script> aqui. -->
+    <!-- <script> ... </script> -->
+  </body>
+</html>
+    <script src='https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2'></script><script  src="./script.js"></script>
+
+  </body>
+  
+</html>

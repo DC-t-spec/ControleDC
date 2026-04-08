@@ -1423,25 +1423,7 @@ async function revenueBookingsBetween(from, to, resourceId = null) {
   return (data || []).reduce((acc, x) => acc + Number(x.total_price || 0), 0);
 }
 
-  async function deleteBooking() {
-  try {
-    const id = (el("bkId")?.value || "").trim();
-    if (!id) return;
 
-    const { error } = await supabase
-      .from("bookings")
-      .delete()
-      .eq("id", id);
-
-    if (error) throw error;
-
-    closeBookingModal();
-    await renderDash();
-    await renderBookings();
-  } catch (err) {
-    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao apagar reserva.";
-  }
-}
 
   
 

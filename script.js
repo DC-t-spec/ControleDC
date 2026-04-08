@@ -787,24 +787,60 @@ if (e1) {
       return;
     }
 
-    if (!id) {
-      db.bookings.push({ id: uid(), resourceId: rid, client, start: startISO, end: endISO, status, price });
-    } else {
-      const bk = db.bookings.find((x) => x.id === id);
-      if (!bk) return;
-      bk.resourceId = rid;
-      bk.client = client;
-      bk.start = startISO;
-      bk.end = endISO;
-      bk.status = status;
-      bk.price = price;
+   async function saveBooking() {
+  try {
+    const id = (el("bkId")?.value || "").trim();
+    const rid = el("bkResource")?.value;
+    const client = (el("bkClient")?.value || "").trim();
+    const s = el("bkStart")?.value;
+    const e = el("bkEnd")?.value;
+    const status = el("bkStatus")?.value;
+    const price = Math.max(0, Number(el("bkPrice")?.value || 0));
+
+    if (!rid || !client || !s || !e) {
+      if (el("bkMsg")) el("bkMsg").textContent = "Preenche recurso, cliente, início e fim.";
+      return;
     }
 
-    saveDB();
-    // opcional: cloudPushSafe();
+    const startISO = new Date(s).toISOString();
+    const endISO = new Date(e).toISOString();
+
+    if (new Date(endISO) <= new Date(startISO)) {
+      if (el("bkMsg")) el("bkMsg").textContent = "Fim deve ser depois do início.";
+      return;
+    }
+
+    const payload = {
+      workspace_id: workspaceId,
+      resource_id: rid,
+      client_name: client,
+      start_at: startISO,
+      end_at: endISO,
+      status,
+      total_price: price
+    };
+
+    let error = null;
+
+    if (!id) {
+      ({ error } = await supabase.from("bookings").insert(payload));
+    } else {
+      ({ error } = await supabase
+        .from("bookings")
+        .update(payload)
+        .eq("id", id));
+    }
+
+    if (error) throw error;
+
     if (el("bkMsg")) el("bkMsg").textContent = "Guardado ✅";
-    renderDash();
-    renderBookings();
+    closeBookingModal();
+    await renderDash();
+    await renderBookings();
+  } catch (err) {
+    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao guardar reserva.";
+  }
+}
   };
 
   const deleteBooking = () => {
@@ -1287,6 +1323,139 @@ if (e1) {
       if (dash && !dash.hidden) renderDash();
     }, 20 * 1000);
   }
+  
+
+  
+async function getMyProfile() {
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+
+  const user = userData?.user;
+  if (!user) return null;
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('user_id, workspace_id, role, active')
+    .eq('user_id', user.id)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function fetchResources(workspaceId) {
+  const { data, error } = await supabase
+    .from('resources')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .eq('active', true)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function fetchBookingsByDay(workspaceId, day) {
+  const start = new Date(day + 'T00:00:00');
+  const end = new Date(day + 'T23:59:59');
+
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .gte('start_at', start.toISOString())
+    .lte('start_at', end.toISOString())
+    .order('start_at', { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function fetchCoworkMembers(workspaceId) {
+  const { data, error } = await supabase
+    .from('cowork_members')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function fetchCoworkDaypasses(workspaceId, date) {
+  const { data, error } = await supabase
+    .from('cowork_daypasses')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .eq('pass_date', date)
+    .order('created_at', { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+  async function fetchBookingsForDay(dayYMD) {
+  const day = new Date(dayYMD + "T00:00:00");
+  const start = new Date(day);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(day);
+  end.setHours(23, 59, 59, 999);
+
+  const { data, error } = await supabase
+    .from("bookings")
+    .select(`
+      id,
+      workspace_id,
+      resource_id,
+      client_name,
+      start_at,
+      end_at,
+      status,
+      total_price
+    `)
+    .eq("workspace_id", workspaceId)
+    .gte("start_at", start.toISOString())
+    .lte("start_at", end.toISOString())
+    .order("start_at", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+  async function fetchBookingById(id) {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+  async function deleteBooking() {
+  try {
+    const id = (el("bkId")?.value || "").trim();
+    if (!id) return;
+
+    const { error } = await supabase
+      .from("bookings")
+      .delete()
+      .eq("id", id);
+
+    if (error) throw error;
+
+    closeBookingModal();
+    await renderDash();
+    await renderBookings();
+  } catch (err) {
+    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao apagar reserva.";
+  }
+}
+
+  
+
 
   document.addEventListener("DOMContentLoaded", () => init());
 })();

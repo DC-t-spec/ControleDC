@@ -603,7 +603,7 @@ const renderTodayList = async () => {
 };
 
 
-  const renderDash = async () => {
+const renderDash = async () => {
   const now = new Date();
   if (el("nowLabel")) el("nowLabel").textContent = `Agora: ${fmt(now.toISOString())}`;
   if (el("dashUpdated")) el("dashUpdated").textContent = `Atualizado: ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
@@ -614,11 +614,11 @@ const renderTodayList = async () => {
   if (el("cwRevenue")) el("cwRevenue").textContent = `Receita mensal ativa: ${MT(coworkMonthlyRevenue())}`;
 
   try {
-   const meet = getResourceByCode("r_meet");
-const studio = getResourceByCode("r_studio");
+    const meet = getResourceByCode("r_meet");
+    const studio = getResourceByCode("r_studio");
 
-const meetNow = meet ? await nowBookingFor(meet.id, now) : null;
-const studioNow = studio ? await nowBookingFor(studio.id, now) : null;
+    const meetNow = meet ? await nowBookingFor(meet.id, now) : null;
+    const studioNow = studio ? await nowBookingFor(studio.id, now) : null;
 
     setStatusPill("meetStatus", !!meetNow);
     setStatusPill("studioStatus", !!studioNow);
@@ -635,8 +635,8 @@ const studioNow = studio ? await nowBookingFor(studio.id, now) : null;
         : "Sem uso agora.";
     }
 
-  const meetNext = meet ? await nextBookingFor(meet.id, now) : null;
-const studioNext = studio ? await nextBookingFor(studio.id, now) : null;
+    const meetNext = meet ? await nextBookingFor(meet.id, now) : null;
+    const studioNext = studio ? await nextBookingFor(studio.id, now) : null;
 
     if (el("meetNext")) {
       el("meetNext").textContent = meetNext
@@ -1321,7 +1321,27 @@ const deleteBooking = async () => {
     hideAuth();
     if (el("btnLogout")) el("btnLogout").style.display = "inline-flex";
 
-    if (workspaceId) await cloudPullSafe();
+  if (workspaceId) {
+  await cloudPullSafe();
+
+  try {
+    const resources = await fetchResources(workspaceId);
+
+    db.resources = resources.map((r) => ({
+      id: r.id,
+      code: r.code,
+      type: r.resource_type,
+      name: r.name,
+      priceHour: Number(r.price_hour || 0),
+      priceDay: Number(r.price_day || 0),
+      priceMonth: Number(r.price_month || 0),
+      capacity: Number(r.capacity || 0),
+      bufferMin: Number(r.buffer_min || 0)
+    }));
+  } catch (err) {
+    console.error("Erro ao carregar resources:", err);
+  }
+}
 
     // 5) renderiza e abre dash
     renderAll();
@@ -1491,6 +1511,8 @@ async function fetchCoworkDaypasses(workspaceId, date) {
 }
 
 async function nowBookingFor(resourceId, now = new Date()) {
+  if (!resourceId) return null;
+
   const { data, error } = await supabase
     .from("bookings")
     .select(`
@@ -1515,6 +1537,8 @@ async function nowBookingFor(resourceId, now = new Date()) {
 }
 
 async function nextBookingFor(resourceId, now = new Date()) {
+  if (!resourceId) return null;
+
   const { data, error } = await supabase
     .from("bookings")
     .select(`
@@ -1546,7 +1570,9 @@ async function revenueBookingsBetween(from, to, resourceId = null) {
     .gte("start_at", new Date(from).toISOString())
     .lte("start_at", new Date(to).toISOString());
 
-  if (resourceId) query = query.eq("resource_id", resourceId);
+  if (resourceId) {
+    query = query.eq("resource_id", resourceId);
+  }
 
   const { data, error } = await query;
   if (error) throw error;

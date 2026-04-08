@@ -7,8 +7,8 @@
   // ===============================
   // SUPABASE (Cloud + Login)
   // ===============================
-  const SUPABASE_URL = "https://aeqmdekpkidkqtlccguz.supabase.co";
-  const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFlcW1kZWtwa2lka3F0bGNjZ3V6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkxNzgyOTksImV4cCI6MjA4NDc1NDI5OX0.TUopQY1qnx3kJW5vrDxioQiaUghE-SU-U1N1XMncCDo";
+  const SUPABASE_URL = "https://awrgsfvgajekzrzaagbq.supabase.co";
+  const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF3cmdzZnZnYWpla3pyemFhZ2JxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2NTE5MzIsImV4cCI6MjA5MTIyNzkzMn0.o5b_nSi2AhvVxejYD_QkBTq6lH0lAutCUZsbuVyjVA4";
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
   let session = null;

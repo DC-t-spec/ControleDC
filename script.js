@@ -480,42 +480,11 @@ if (e1) {
       });
   };
 
-  const nowBookingFor = (resourceId, now = new Date()) => {
-    const t = now.getTime();
-    return (
-      db.bookings.find((b) => {
-        if (b.resourceId !== resourceId) return false;
-        if (!["confirmed", "checked_in"].includes(b.status)) return false;
-        const s = new Date(b.start).getTime();
-        const e = new Date(b.end).getTime();
-        return s <= t && t < e;
-      }) || null
-    );
-  };
+ 
 
-  const nextBookingFor = (resourceId, now = new Date()) => {
-    const t = now.getTime();
-    return (
-      db.bookings
-        .filter((b) => b.resourceId === resourceId)
-        .filter((b) => ["confirmed", "pending"].includes(b.status))
-        .filter((b) => new Date(b.start).getTime() > t)
-        .sort((a, b) => new Date(a.start) - new Date(b.start))[0] || null
-    );
-  };
+ 
 
-  const revenueBookingsBetween = (from, to, resourceId = null) => {
-    const a = new Date(from).getTime();
-    const b = new Date(to).getTime();
-    return db.bookings
-      .filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status))
-      .filter((x) => {
-        const s = new Date(x.start).getTime();
-        return s >= a && s <= b;
-      })
-      .filter((x) => (resourceId ? x.resourceId === resourceId : true))
-      .reduce((acc, x) => acc + Number(x.price || 0), 0);
-  };
+ 
 
   // ---------- UI helper ----------
   const setStatusPill = (hostId, busy) => {
@@ -527,218 +496,169 @@ if (e1) {
   };
 
   // ---------- Dashboard ----------
-  const renderTodayList = () => {
-    const host = el("todayList");
-    if (!host) return;
-    host.innerHTML = "";
 
-    const today = new Date();
-    const a = startOfDay(today).getTime();
-    const b = endOfDay(today).getTime();
 
-    const rows = db.bookings
-      .filter((x) => {
-        const s = new Date(x.start).getTime();
-        return s >= a && s <= b;
-      })
-      .sort((x, y) => new Date(x.start) - new Date(y.start));
 
-    if (el("todayMeta")) el("todayMeta").textContent = `${rows.length} reserva(s) hoje`;
 
-    if (!rows.length) {
-      if (el("todayMsg")) el("todayMsg").textContent = "Sem reservas para hoje.";
-      return;
-    }
-    if (el("todayMsg")) el("todayMsg").textContent = "";
+  const renderDash = async () => {
+  const now = new Date();
+  if (el("nowLabel")) el("nowLabel").textContent = `Agora: ${fmt(now.toISOString())}`;
+  if (el("dashUpdated")) el("dashUpdated").textContent = `Atualizado: ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
 
-    rows.forEach((bk) => {
-      const r = getResource(bk.resourceId);
-      const statusClass =
-        bk.status === "confirmed" ? "ok" : bk.status === "pending" ? "warn" : bk.status === "cancelled" ? "bad" : "warn";
+  const av = coworkAvailability();
+  if (el("cwOcc")) el("cwOcc").textContent = `${av.used}/${av.cap}`;
+  if (el("cwFree")) el("cwFree").textContent = `${av.free} lugar(es) livres`;
+  if (el("cwRevenue")) el("cwRevenue").textContent = `Receita mensal ativa: ${MT(coworkMonthlyRevenue())}`;
 
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">${r?.name || "—"} • ${bk.client || "—"}</div>
-          <div class="item-meta">${fmt(bk.start)} → ${fmt(bk.end)} • ${MT(bk.price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
-        </div>
-        <button class="btn sm" data-edit="${bk.id}">Abrir</button>
-      `;
-      host.append
-      host.appendChild(item);
-    });
-
-    host.querySelectorAll("[data-edit]").forEach((btn) => {
-      btn.onclick = () => {
-        showScreen("bookings");
-        openBookingModal(btn.getAttribute("data-edit"));
-      };
-    });
-  };
-
-  const renderQuickReport = (mode) => {
-    const now = new Date();
-    let from, to, label;
-
-    if (mode === "today") {
-      from = startOfDay(now);
-      to = endOfDay(now);
-      label = "Hoje";
-    } else if (mode === "week") {
-      from = startOfWeek(now);
-      const end = new Date(from);
-      end.setDate(from.getDate() + 6);
-      to = endOfDay(end);
-      label = "Esta semana";
-    } else {
-      from = startOfMonth(now);
-      to = endOfMonth(now);
-      label = "Este mês";
-    }
-
-    const totalRooms = revenueBookingsBetween(from, to, "r_meet") + revenueBookingsBetween(from, to, "r_studio");
-    const totalCoworkDay = revenueCoworkDaypassesBetween(from, to);
-    const total = totalRooms + totalCoworkDay;
-
-    if (el("repTotal")) el("repTotal").textContent = MT(total);
-    if (el("repMeta")) el("repMeta").textContent = `${label} • Cowork diárias: ${MT(totalCoworkDay)}`;
-    renderDash._rep = mode;
-  };
-
-  const renderDash = () => {
-    const now = new Date();
-    if (el("nowLabel")) el("nowLabel").textContent = `Agora: ${fmt(now.toISOString())}`;
-    if (el("dashUpdated")) el("dashUpdated").textContent = `Atualizado: ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
-
-    const av = coworkAvailability();
-    if (el("cwOcc")) el("cwOcc").textContent = `${av.used}/${av.cap}`;
-    if (el("cwFree")) el("cwFree").textContent = `${av.free} lugar(es) livres`;
-    if (el("cwRevenue")) el("cwRevenue").textContent = `Receita mensal ativa: ${MT(coworkMonthlyRevenue())}`;
-
-    const meetNow = nowBookingFor("r_meet", now);
-    const studioNow = nowBookingFor("r_studio", now);
+  try {
+    const meetNow = await nowBookingFor("r_meet", now);
+    const studioNow = await nowBookingFor("r_studio", now);
 
     setStatusPill("meetStatus", !!meetNow);
     setStatusPill("studioStatus", !!studioNow);
 
-    if (el("meetNow")) el("meetNow").textContent = meetNow ? `Em uso por ${meetNow.client} até ${fmt(meetNow.end)}` : "Sem uso agora.";
-    if (el("studioNow")) el("studioNow").textContent = studioNow ? `Em uso por ${studioNow.client} até ${fmt(studioNow.end)}` : "Sem uso agora.";
+    if (el("meetNow")) {
+      el("meetNow").textContent = meetNow
+        ? `Em uso por ${meetNow.client_name} até ${fmt(meetNow.end_at)}`
+        : "Sem uso agora.";
+    }
 
-    const meetNext = nextBookingFor("r_meet", now);
-    const studioNext = nextBookingFor("r_studio", now);
+    if (el("studioNow")) {
+      el("studioNow").textContent = studioNow
+        ? `Em uso por ${studioNow.client_name} até ${fmt(studioNow.end_at)}`
+        : "Sem uso agora.";
+    }
 
-    if (el("meetNext")) el("meetNext").textContent = meetNext ? `Próxima: ${fmt(meetNext.start)} (${meetNext.status})` : "Sem próximas reservas.";
-    if (el("studioNext")) el("studioNext").textContent = studioNext ? `Próxima: ${fmt(studioNext.start)} (${studioNext.status})` : "Sem próximas reservas.";
+    const meetNext = await nextBookingFor("r_meet", now);
+    const studioNext = await nextBookingFor("r_studio", now);
+
+    if (el("meetNext")) {
+      el("meetNext").textContent = meetNext
+        ? `Próxima: ${fmt(meetNext.start_at)} (${meetNext.status})`
+        : "Sem próximas reservas.";
+    }
+
+    if (el("studioNext")) {
+      el("studioNext").textContent = studioNext
+        ? `Próxima: ${fmt(studioNext.start_at)} (${studioNext.status})`
+        : "Sem próximas reservas.";
+    }
 
     if (!renderDash._rep) renderDash._rep = "today";
-    renderQuickReport(renderDash._rep);
-    renderTodayList();
-  };
+    await renderQuickReport(renderDash._rep);
+    await renderTodayList();
+  } catch (err) {
+    console.error("Erro no dashboard:", err);
+  }
+};
 
   // ---------- Bookings screen ----------
   const setBookingDayDefault = () => {
     if (el("bkDay") && !el("bkDay").value) el("bkDay").value = ymd(new Date());
   };
 
-  const bookingsForDay = (dayYMD) => {
-    const day = new Date(dayYMD + "T00:00:00");
-    const a = startOfDay(day).getTime();
-    const b = endOfDay(day).getTime();
-    return db.bookings.filter((x) => {
-      const s = new Date(x.start).getTime();
-      return s >= a && s <= b;
-    });
-  };
+  const bookingsForDay = async (dayYMD) => {
+  return await fetchBookingsForDay(dayYMD);
+};
 
-  const renderBookings = () => {
-    fillSelects();
-    setBookingDayDefault();
-    if (!el("bookingsList")) return;
+const renderBookings = async () => {
+  fillSelects();
+  setBookingDayDefault();
+  if (!el("bookingsList")) return;
 
-    const day = el("bkDay").value;
-    const rid = el("bkFilterResource")?.value || "all";
-    const st = el("bkFilterStatus")?.value || "all";
-    const q = (el("bkSearch")?.value || "").trim().toLowerCase();
+  const day = el("bkDay").value;
+  const rid = el("bkFilterResource")?.value || "all";
+  const st = el("bkFilterStatus")?.value || "all";
+  const q = (el("bkSearch")?.value || "").trim().toLowerCase();
 
-    let rows = bookingsForDay(day)
-      .filter((b) => ["room", "studio"].includes(getResource(b.resourceId)?.type))
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
+  let rows = await bookingsForDay(day);
 
-    if (rid !== "all") rows = rows.filter((b) => b.resourceId === rid);
-    if (st !== "all") rows = rows.filter((b) => b.status === st);
-    if (q) rows = rows.filter((b) => String(b.client || "").toLowerCase().includes(q));
+  rows = rows
+    .filter((b) => ["room", "studio"].includes(getResource(b.resource_id)?.type))
+    .sort((a, b) => new Date(a.start_at) - new Date(b.start_at));
 
-    const host = el("bookingsList");
-    host.innerHTML = "";
+  if (rid !== "all") rows = rows.filter((b) => b.resource_id === rid);
+  if (st !== "all") rows = rows.filter((b) => b.status === st);
+  if (q) rows = rows.filter((b) => String(b.client_name || "").toLowerCase().includes(q));
 
-    if (!rows.length) {
-      if (el("bookingsMsg")) el("bookingsMsg").textContent = "Sem reservas para os filtros atuais.";
-      return;
-    }
-    if (el("bookingsMsg")) el("bookingsMsg").textContent = "";
+  const host = el("bookingsList");
+  host.innerHTML = "";
 
-    rows.forEach((bk) => {
-      const r = getResource(bk.resourceId);
-      const statusClass =
-        bk.status === "confirmed" ? "ok" : bk.status === "pending" ? "warn" : bk.status === "cancelled" ? "bad" : "warn";
+  if (!rows.length) {
+    if (el("bookingsMsg")) el("bookingsMsg").textContent = "Sem reservas para os filtros atuais.";
+    return;
+  }
 
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">${r?.name || "—"} • ${bk.client}</div>
-          <div class="item-meta">${fmt(bk.start)} → ${fmt(bk.end)} • ${MT(bk.price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
-        </div>
-        <button class="btn sm" data-edit="${bk.id}">Abrir</button>
-      `;
-      host.appendChild(item);
-    });
+  if (el("bookingsMsg")) el("bookingsMsg").textContent = "";
 
-    host.querySelectorAll("[data-edit]").forEach((btn) => {
-      btn.onclick = () => openBookingModal(btn.getAttribute("data-edit"));
-    });
-  };
+  rows.forEach((bk) => {
+    const r = getResource(bk.resource_id);
+    const statusClass =
+      bk.status === "confirmed" ? "ok" :
+      bk.status === "pending" ? "warn" :
+      bk.status === "cancelled" ? "bad" : "warn";
 
-  const openBookingModal = (id = null) => {
-    fillSelects();
-    if (!el("bookingModal")) return;
+    const item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML = `
+      <div>
+        <div class="item-title">${r?.name || "—"} • ${bk.client_name}</div>
+        <div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
+      </div>
+      <button class="btn sm" data-edit="${bk.id}">Abrir</button>
+    `;
+    host.appendChild(item);
+  });
 
-    if (el("bkMsg")) el("bkMsg").textContent = "—";
-    el("bookingModal").style.display = "grid";
+  host.querySelectorAll("[data-edit]").forEach((btn) => {
+    btn.onclick = () => openBookingModal(btn.getAttribute("data-edit"));
+  });
+};
 
-    if (!id) {
-      if (el("bkModalTitle")) el("bkModalTitle").textContent = "Nova reserva";
-      el("bkId").value = "";
-      el("bkClient").value = "";
-      el("bkStatus").value = "confirmed";
-      el("bkResource").value = "r_meet";
+const openBookingModal = async (id = null) => {
+  fillSelects();
+  if (!el("bookingModal")) return;
 
-      const day = el("bkDay")?.value || ymd(new Date());
-      el("bkStart").value = `${day}T09:00`;
-      el("bkEnd").value = `${day}T10:00`;
+  if (el("bkMsg")) el("bkMsg").textContent = "—";
+  el("bookingModal").style.display = "grid";
 
-      autoPriceFor();
-      if (el("btnDeleteBooking")) el("btnDeleteBooking").style.display = "none";
-      return;
-    }
+  if (!id) {
+    if (el("bkModalTitle")) el("bkModalTitle").textContent = "Nova reserva";
+    el("bkId").value = "";
+    el("bkClient").value = "";
+    el("bkStatus").value = "confirmed";
+    el("bkResource").value = "r_meet";
 
-    const bk = db.bookings.find((x) => x.id === id);
-    if (!bk) return closeBookingModal();
+    const day = el("bkDay")?.value || ymd(new Date());
+    el("bkStart").value = `${day}T09:00`;
+    el("bkEnd").value = `${day}T10:00`;
+
+    autoPriceFor();
+    if (el("btnDeleteBooking")) el("btnDeleteBooking").style.display = "none";
+    return;
+  }
+
+  try {
+    const bk = await fetchBookingById(id);
 
     if (el("bkModalTitle")) el("bkModalTitle").textContent = "Editar reserva";
     el("bkId").value = bk.id;
-    el("bkResource").value = bk.resourceId;
-    el("bkClient").value = bk.client || "";
+    el("bkResource").value = bk.resource_id;
+    el("bkClient").value = bk.client_name || "";
     el("bkStatus").value = bk.status || "confirmed";
-    el("bkPrice").value = Number(bk.price || 0);
+    el("bkPrice").value = Number(bk.total_price || 0);
 
-    const s = new Date(bk.start), e = new Date(bk.end);
+    const s = new Date(bk.start_at);
+    const e = new Date(bk.end_at);
+
     el("bkStart").value = `${ymd(s)}T${pad2(s.getHours())}:${pad2(s.getMinutes())}`;
     el("bkEnd").value = `${ymd(e)}T${pad2(e.getHours())}:${pad2(e.getMinutes())}`;
 
     if (el("btnDeleteBooking")) el("btnDeleteBooking").style.display = "inline-flex";
-  };
+  } catch (err) {
+    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao abrir reserva.";
+  }
+};
 
   const closeBookingModal = () => {
     if (el("bookingModal")) el("bookingModal").style.display = "none";
@@ -761,33 +681,7 @@ if (e1) {
     if (el("bkPrice")) el("bkPrice").value = isFinite(price) ? price : 0;
   };
 
-  const saveBooking = () => {
-    const id = (el("bkId")?.value || "").trim();
-    const rid = el("bkResource")?.value;
-    const client = (el("bkClient")?.value || "").trim();
-    const s = el("bkStart")?.value;
-    const e = el("bkEnd")?.value;
-    const status = el("bkStatus")?.value;
-    const price = Math.max(0, Number(el("bkPrice")?.value || 0));
-
-    if (!rid || !client || !s || !e) {
-      if (el("bkMsg")) el("bkMsg").textContent = "Preenche recurso, cliente, início e fim.";
-      return;
-    }
-
-    const startISO = toISOfromLocal(s);
-    const endISO = toISOfromLocal(e);
-    if (new Date(endISO) <= new Date(startISO)) {
-      if (el("bkMsg")) el("bkMsg").textContent = "Fim deve ser depois do início.";
-      return;
-    }
-
-    if (status !== "cancelled" && hasConflict(rid, startISO, endISO, id || null)) {
-      if (el("bkMsg")) el("bkMsg").textContent = "Conflito de horário (já existe reserva nesse período).";
-      return;
-    }
-
-   async function saveBooking() {
+const saveBooking = async () => {
   try {
     const id = (el("bkId")?.value || "").trim();
     const rid = el("bkResource")?.value;
@@ -840,18 +734,27 @@ if (e1) {
   } catch (err) {
     if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao guardar reserva.";
   }
-}
-  };
+};
 
-  const deleteBooking = () => {
+const deleteBooking = async () => {
+  try {
     const id = (el("bkId")?.value || "").trim();
     if (!id) return;
-    db.bookings = db.bookings.filter((x) => x.id !== id);
-    saveDB();
+
+    const { error } = await supabase
+      .from("bookings")
+      .delete()
+      .eq("id", id);
+
+    if (error) throw error;
+
     closeBookingModal();
-    renderDash();
-    renderBookings();
-  };
+    await renderDash();
+    await renderBookings();
+  } catch (err) {
+    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao apagar reserva.";
+  }
+};
 
   // ---------- Cowork screen ----------
   const renderCowork = () => {
@@ -1432,6 +1335,92 @@ async function fetchCoworkDaypasses(workspaceId, date) {
 
   if (error) throw error;
   return data;
+}
+
+  async function fetchBookingsBetween(from, to) {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select(`
+      id,
+      workspace_id,
+      resource_id,
+      client_name,
+      start_at,
+      end_at,
+      status,
+      total_price
+    `)
+    .eq("workspace_id", workspaceId)
+    .gte("start_at", new Date(from).toISOString())
+    .lte("start_at", new Date(to).toISOString())
+    .order("start_at", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function nowBookingFor(resourceId, now = new Date()) {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select(`
+      id,
+      resource_id,
+      client_name,
+      start_at,
+      end_at,
+      status,
+      total_price
+    `)
+    .eq("workspace_id", workspaceId)
+    .eq("resource_id", resourceId)
+    .in("status", ["confirmed", "checked_in"])
+    .lte("start_at", now.toISOString())
+    .gt("end_at", now.toISOString())
+    .order("start_at", { ascending: true })
+    .limit(1);
+
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+async function nextBookingFor(resourceId, now = new Date()) {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select(`
+      id,
+      resource_id,
+      client_name,
+      start_at,
+      end_at,
+      status,
+      total_price
+    `)
+    .eq("workspace_id", workspaceId)
+    .eq("resource_id", resourceId)
+    .in("status", ["confirmed", "pending"])
+    .gt("start_at", now.toISOString())
+    .order("start_at", { ascending: true })
+    .limit(1);
+
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+async function revenueBookingsBetween(from, to, resourceId = null) {
+  let query = supabase
+    .from("bookings")
+    .select("total_price")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["confirmed", "checked_in", "checked_out"])
+    .gte("start_at", new Date(from).toISOString())
+    .lte("start_at", new Date(to).toISOString());
+
+  if (resourceId) query = query.eq("resource_id", resourceId);
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  return (data || []).reduce((acc, x) => acc + Number(x.total_price || 0), 0);
 }
 
   async function deleteBooking() {

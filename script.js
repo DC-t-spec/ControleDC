@@ -97,7 +97,7 @@ console.log("profiles found:", data, error);
   .eq("code", cc);
 
 console.log("workspaces found:", ws, e1);
-      .single();
+    
 if (e1) {
   console.log("DEBUG workspaces select error:", e1);
   throw new Error(e1.message || "Erro ao validar código.");

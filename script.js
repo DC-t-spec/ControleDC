@@ -64,55 +64,63 @@
     return session;
   }
 
-  async function getMyWorkspaceId() {
-    const { data: u, error: e0 } = await supabase.auth.getUser();
-    if (e0) throw e0;
-    const user = u?.user;
-    if (!user) return null;
+async function getMyWorkspaceId() {
+  const { data: u, error: e0 } = await supabase.auth.getUser();
+  if (e0) throw e0;
+
+  const user = u?.user;
+  if (!user) return null;
 
   const { data, error } = await supabase
-  .from("profiles")
-  .select("workspace_id, role, active")
-  .eq("user_id", user.id);
+    .from("profiles")
+    .select("workspace_id, role, active")
+    .eq("user_id", user.id)
+    .maybeSingle();
 
-console.log("profiles found:", data, error);
+  console.log("profile found:", data, error);
 
-    if (error) throw error;
-    return data?.workspace_id || null;
-  }
+  if (error) throw error;
+  return data?.workspace_id || null;
+}
+  
+async function joinWorkspaceByCode(code) {
+  const cc = String(code || "").trim().toUpperCase();
+  if (!cc) throw new Error("Código da empresa é obrigatório.");
 
-  async function joinWorkspaceByCode(code) {
-    const cc = String(code || "").trim();
-    if (!cc) throw new Error("Código da empresa é obrigatório.");
+  const { data: u, error: e0 } = await supabase.auth.getUser();
+  if (e0) throw e0;
 
-    const { data: u, error: e0 } = await supabase.auth.getUser();
-    if (e0) throw e0;
-
-    const user = u?.user;
-    if (!user) throw new Error("Sem sessão.");
+  const user = u?.user;
+  if (!user) throw new Error("Sem sessão.");
 
   const { data: ws, error: e1 } = await supabase
-  .from("workspaces")
-  .select("id, code")
-  .eq("code", cc);
+    .from("workspaces")
+    .select("id, code, active")
+    .eq("code", cc)
+    .eq("active", true)
+    .maybeSingle();
 
-console.log("workspaces found:", ws, e1);
-    
-if (e1) {
-  console.log("DEBUG workspaces select error:", e1);
-  throw new Error(e1.message || "Erro ao validar código.");
+  console.log("workspace found:", ws, e1, "code typed:", cc);
+
+  if (e1) throw new Error(e1.message || "Erro ao validar código.");
+  if (!ws) throw new Error("Código inválido ou empresa não encontrada.");
+
+  const { error: e2 } = await supabase
+    .from("profiles")
+    .upsert(
+      {
+        user_id: user.id,
+        workspace_id: ws.id,
+        role: "member",
+        active: true
+      },
+      { onConflict: "user_id" }
+    );
+
+  if (e2) throw e2;
+
+  return ws.id;
 }
-
-    if (e1) throw new Error("Código inválido ou empresa não encontrada.");
-
-    const { error: e2 } = await supabase
-      .from("profiles")
-      .upsert({ user_id: user.id, workspace_id: ws.id, role: "member", active: true });
-
-    if (e2) throw e2;
-    return ws.id;
-  }
-
   async function signUp(email, pass, code) {
     const { error } = await supabase.auth.signUp({ email, password: pass });
     if (error) throw error;
@@ -504,7 +512,95 @@ function getResourceByCode(code) {
 
   // ---------- Dashboard ----------
 
+const renderTodayList = async () => {
+  const host = el("todayList");
+  if (!host) return;
+  host.innerHTML = "";
 
+  try {
+    const today = new Date();
+    const a = startOfDay(today);
+    const b = endOfDay(today);
+
+    const rows = await fetchBookingsBetween(a, b);
+
+    if (el("todayMeta")) el("todayMeta").textContent = `${rows.length} reserva(s) hoje`;
+
+    if (!rows.length) {
+      if (el("todayMsg")) el("todayMsg").textContent = "Sem reservas para hoje.";
+      return;
+    }
+
+    if (el("todayMsg")) el("todayMsg").textContent = "";
+
+    rows.forEach((bk) => {
+      const r = getResource(bk.resource_id);
+      const statusClass =
+        bk.status === "confirmed" ? "ok" :
+        bk.status === "pending" ? "warn" :
+        bk.status === "cancelled" ? "bad" : "warn";
+
+      const item = document.createElement("div");
+      item.className = "item";
+      item.innerHTML = `
+        <div>
+          <div class="item-title">${r?.name || "—"} • ${bk.client_name || "—"}</div>
+          <div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
+        </div>
+        <button class="btn sm" data-edit="${bk.id}">Abrir</button>
+      `;
+      host.appendChild(item);
+    });
+
+    host.querySelectorAll("[data-edit]").forEach((btn) => {
+      btn.onclick = () => {
+        showScreen("bookings");
+        openBookingModal(btn.getAttribute("data-edit"));
+      };
+    });
+  } catch (err) {
+    if (el("todayMsg")) el("todayMsg").textContent = err.message || "Erro ao carregar reservas de hoje.";
+  }
+};
+
+  const renderQuickReport = async (mode) => {
+  const now = new Date();
+  let from, to, label;
+
+  if (mode === "today") {
+    from = startOfDay(now);
+    to = endOfDay(now);
+    label = "Hoje";
+  } else if (mode === "week") {
+    from = startOfWeek(now);
+    const end = new Date(from);
+    end.setDate(from.getDate() + 6);
+    to = endOfDay(end);
+    label = "Esta semana";
+  } else {
+    from = startOfMonth(now);
+    to = endOfMonth(now);
+    label = "Este mês";
+  }
+
+  try {
+    const meet = getResourceByCode("r_meet");
+    const studio = getResourceByCode("r_studio");
+
+    const totalMeet = meet ? await revenueBookingsBetween(from, to, meet.id) : 0;
+    const totalStudio = studio ? await revenueBookingsBetween(from, to, studio.id) : 0;
+
+    const totalRooms = totalMeet + totalStudio;
+    const totalCoworkDay = revenueCoworkDaypassesBetween(from, to);
+    const total = totalRooms + totalCoworkDay;
+
+    if (el("repTotal")) el("repTotal").textContent = MT(total);
+    if (el("repMeta")) el("repMeta").textContent = `${label} • Cowork diárias: ${MT(totalCoworkDay)}`;
+    renderDash._rep = mode;
+  } catch (err) {
+    if (el("repMeta")) el("repMeta").textContent = err.message || "Erro ao calcular resumo.";
+  }
+};
 
 
   const renderDash = async () => {

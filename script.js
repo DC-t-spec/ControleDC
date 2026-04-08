@@ -70,11 +70,12 @@
     const user = u?.user;
     if (!user) return null;
 
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("workspace_id, role, active")
-      .eq("user_id", user.id)
-      .maybeSingle();
+  const { data, error } = await supabase
+  .from("profiles")
+  .select("workspace_id, role, active")
+  .eq("user_id", user.id);
+
+console.log("profiles found:", data, error);
 
     if (error) throw error;
     return data?.workspace_id || null;
@@ -90,10 +91,12 @@
     const user = u?.user;
     if (!user) throw new Error("Sem sessão.");
 
-    const { data: ws, error: e1 } = await supabase
-      .from("workspaces")
-      .select("id")
-      .eq("code", cc)
+  const { data: ws, error: e1 } = await supabase
+  .from("workspaces")
+  .select("id, code")
+  .eq("code", cc);
+
+console.log("workspaces found:", ws, e1);
       .single();
 if (e1) {
   console.log("DEBUG workspaces select error:", e1);

@@ -180,6 +180,10 @@ if (e1) {
     // cloudPushSafe();
   };
 
+function getResourceByCode(code) {
+  return db?.resources?.find((r) => r.code === code) || null;
+}
+  
   const getResource = (id) => db?.resources?.find((r) => r.id === id);
   const getCowork = () => db?.resources?.find((r) => r.type === "cowork");
   // ------- SNAPSHOT CLOUD (db inteiro por empresa) -------
@@ -514,8 +518,11 @@ if (e1) {
   if (el("cwRevenue")) el("cwRevenue").textContent = `Receita mensal ativa: ${MT(coworkMonthlyRevenue())}`;
 
   try {
-    const meetNow = await nowBookingFor("r_meet", now);
-    const studioNow = await nowBookingFor("r_studio", now);
+   const meet = getResourceByCode("r_meet");
+const studio = getResourceByCode("r_studio");
+
+const meetNow = meet ? await nowBookingFor(meet.id, now) : null;
+const studioNow = studio ? await nowBookingFor(studio.id, now) : null;
 
     setStatusPill("meetStatus", !!meetNow);
     setStatusPill("studioStatus", !!studioNow);
@@ -532,8 +539,8 @@ if (e1) {
         : "Sem uso agora.";
     }
 
-    const meetNext = await nextBookingFor("r_meet", now);
-    const studioNext = await nextBookingFor("r_studio", now);
+  const meetNext = meet ? await nextBookingFor(meet.id, now) : null;
+const studioNext = studio ? await nextBookingFor(studio.id, now) : null;
 
     if (el("meetNext")) {
       el("meetNext").textContent = meetNext
@@ -630,7 +637,8 @@ const openBookingModal = async (id = null) => {
     el("bkId").value = "";
     el("bkClient").value = "";
     el("bkStatus").value = "confirmed";
-    el("bkResource").value = "r_meet";
+   const meet = getResourceByCode("r_meet");
+el("bkResource").value = meet?.id || "";
 
     const day = el("bkDay")?.value || ymd(new Date());
     el("bkStart").value = `${day}T09:00`;
@@ -1228,6 +1236,30 @@ const deleteBooking = async () => {
       const dash = el("scr-dash");
       if (dash && !dash.hidden) renderDash();
     }, 20 * 1000);
+
+    if (workspaceId) {
+  await cloudPullSafe();
+
+  try {
+    const resources = await fetchResources(workspaceId);
+
+    db.resources = resources.map((r) => ({
+      id: r.id, // UUID REAL
+      code: r.code,
+      type: r.resource_type,
+      name: r.name,
+      priceHour: Number(r.price_hour || 0),
+      priceDay: Number(r.price_day || 0),
+      priceMonth: Number(r.price_month || 0),
+      capacity: Number(r.capacity || 0),
+      bufferMin: Number(r.buffer_min || 0)
+    }));
+
+  } catch (err) {
+    console.error("Erro ao carregar resources:", err);
+  }
+}
+    
   }
   
 

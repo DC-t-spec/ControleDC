@@ -152,9 +152,9 @@ async function joinWorkspaceByCode(code) {
   const emptyDB = () => ({
     meta: { version: "1.1", updatedAt: new Date().toISOString() },
     resources: [
-      { id: "r_meet", type: "room", name: "Sala de Reuniões", priceHour: 800, bufferMin: 10 },
-      { id: "r_studio", type: "studio", name: "Estúdio", priceHour: 1500, bufferMin: 15 },
-      { id: "r_cowork", type: "cowork", name: "Cowork", capacity: 20, priceMonth: 6000, priceDay: 300 }
+      { id: "r_meet", code: "r_meet", type: "room", name: "Sala de Reuniões", priceHour: 800, bufferMin: 10 },
+      { id: "r_studio", code: "r_studio", type: "studio", name: "Estúdio", priceHour: 1500, bufferMin: 15 },
+      { id: "r_cowork", code: "r_cowork", type: "cowork", name: "Cowork", capacity: 20, priceMonth: 6000, priceDay: 300 }
     ],
     cowork_members: [],
     cowork_daypasses: [],
@@ -189,7 +189,7 @@ async function joinWorkspaceByCode(code) {
   };
 
 function getResourceByCode(code) {
-  return db?.resources?.find((r) => r.code === code) || null;
+  return db?.resources?.find((r) => r.code === code || r.id === code) || null;
 }
   
   const getResource = (id) => db?.resources?.find((r) => r.id === id);
@@ -333,7 +333,7 @@ function getResourceByCode(code) {
     }
 
     // troca telas da app
-    const screens = ["dash", "bookings", "cowork", "reports"];
+    const screens = ["dash", "bookings", "cowork", "tasks", "team", "approvals", "reports"];
     screens.forEach((k) => {
       const node = el("scr-" + k);
       if (node) node.hidden = k !== id;
@@ -345,6 +345,9 @@ function getResourceByCode(code) {
     if (id === "dash") renderDash();
     if (id === "bookings") renderBookings();
     if (id === "cowork") renderCowork();
+    if (id === "tasks") renderTasks();
+    if (id === "team") renderTeam();
+    if (id === "approvals") renderApprovals();
     if (id === "reports") renderReports();
   };
 
@@ -356,11 +359,17 @@ function getResourceByCode(code) {
     const dash = el("scr-dash");
     const bookings = el("scr-bookings");
     const cowork = el("scr-cowork");
+    const tasks = el("scr-tasks");
+    const team = el("scr-team");
+    const approvals = el("scr-approvals");
     const reports = el("scr-reports");
-    if (dash && bookings && cowork && reports) {
+    if (dash && bookings && cowork && tasks && team && approvals && reports) {
       if (!dash.hidden) renderDash();
       else if (!bookings.hidden) renderBookings();
       else if (!cowork.hidden) renderCowork();
+      else if (!tasks.hidden) renderTasks();
+      else if (!team.hidden) renderTeam();
+      else if (!approvals.hidden) renderApprovals();
       else if (!reports.hidden) renderReports();
       else showScreen("dash");
     } else {
@@ -977,6 +986,123 @@ const deleteBooking = async () => {
     renderDash();
   };
 
+
+
+  // ---------- tasks / team / approvals (DC-Task unificado) ----------
+  const escapeHtml = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  const isAdmin = async () => (await getMyProfile())?.role === "admin";
+  const taskStatusLabel = (s) => ({ todo: "Por fazer", doing: "Em curso", blocked: "Bloqueada", done: "Concluída", canceled: "Cancelada" }[s] || s || "—");
+  const dueTag = (due, status) => {
+    if (!due || ["done", "canceled"].includes(status)) return "";
+    const diff = new Date(due).getTime() - Date.now();
+    if (diff < 0) return '<span class="badge bad">Atrasada</span>';
+    if (diff <= 48 * 36e5) return '<span class="badge warn">A vencer</span>';
+    return '<span class="badge ok">No prazo</span>';
+  };
+  async function fetchProfiles() {
+    if (!workspaceId) return [];
+    const { data, error } = await supabase.from("profiles").select("user_id, workspace_id, role, active, name").eq("workspace_id", workspaceId).order("name", { ascending: true });
+    if (error) throw error;
+    return data || [];
+  }
+  async function fillTaskOwners() {
+    const sel = el("taskOwner");
+    const teamSel = el("teamUserFilter");
+    const profiles = await fetchProfiles();
+    if (sel) sel.innerHTML = "";
+    if (teamSel) teamSel.innerHTML = '<option value="all">Todos</option>';
+    const current = (await supabase.auth.getUser()).data?.user?.id;
+    profiles.filter((p) => p.active).forEach((p) => {
+      const label = p.name || p.user_id || "—";
+      if (sel) sel.insertAdjacentHTML("beforeend", `<option value="${p.user_id}">${escapeHtml(label)}</option>`);
+      if (teamSel) teamSel.insertAdjacentHTML("beforeend", `<option value="${p.user_id}">${escapeHtml(label)}</option>`);
+    });
+    if (sel && current && !sel.value) sel.value = current;
+  }
+  async function fetchTasks(all = false) {
+    if (!workspaceId) return [];
+    const userId = (await supabase.auth.getUser()).data?.user?.id;
+    let q = supabase.from("tasks").select("*").eq("workspace_id", workspaceId).order("due_at", { ascending: true });
+    if (!all) q = q.eq("owner_id", userId);
+    const { data, error } = await q;
+    if (error) throw error;
+    return data || [];
+  }
+  function taskCard(t, profiles = []) {
+    const owner = profiles.find((p) => p.user_id === t.owner_id)?.name || t.owner_id || "—";
+    return `<div class="item"><div><div class="item-title">${escapeHtml(t.title)}</div><div class="item-meta">${escapeHtml(owner)} • ${taskStatusLabel(t.status)} • ${escapeHtml(t.priority)} • Prazo: ${t.due_at ? fmt(t.due_at) : "—"} ${dueTag(t.due_at, t.status)}</div>${t.description ? `<div class="item-meta">${escapeHtml(t.description)}</div>` : ""}</div><button class="btn sm" data-task-edit="${t.id}">Abrir</button></div>`;
+  }
+  async function renderTasks() {
+    const host = el("tasksList"); if (!host) return;
+    try {
+      const [rows0, profiles] = await Promise.all([fetchTasks(false), fetchProfiles()]);
+      const st = el("taskStatusFilter")?.value || "all";
+      const q = (el("taskSearch")?.value || "").toLowerCase().trim();
+      let rows = rows0;
+      if (st !== "all") rows = rows.filter((t) => t.status === st);
+      if (q) rows = rows.filter((t) => String(t.title + " " + (t.description || "")).toLowerCase().includes(q));
+      host.innerHTML = rows.length ? rows.map((t) => taskCard(t, profiles)).join("") : '<p class="muted">Sem actividades.</p>';
+      if (el("tasksMsg")) el("tasksMsg").textContent = `${rows.length} actividade(s).`;
+      host.querySelectorAll("[data-task-edit]").forEach((b) => b.onclick = () => openTaskModal(b.dataset.taskEdit));
+    } catch (e) { if (el("tasksMsg")) el("tasksMsg").textContent = e.message || String(e); }
+  }
+  async function renderTeam() {
+    const host = el("teamList"); if (!host) return;
+    try {
+      await fillTaskOwners();
+      if (!(await isAdmin())) { el("teamMsg").textContent = "Área reservada a administradores."; host.innerHTML = ""; return; }
+      const [rows0, profiles] = await Promise.all([fetchTasks(true), fetchProfiles()]);
+      const owner = el("teamUserFilter")?.value || "all"; const st = el("teamTaskStatusFilter")?.value || "all";
+      let rows = rows0; if (owner !== "all") rows = rows.filter((t) => t.owner_id === owner); if (st !== "all") rows = rows.filter((t) => t.status === st);
+      host.innerHTML = rows.length ? rows.map((t) => taskCard(t, profiles)).join("") : '<p class="muted">Sem actividades da equipa.</p>';
+      el("teamMsg").textContent = `${rows.length} actividade(s) da equipa.`;
+      host.querySelectorAll("[data-task-edit]").forEach((b) => b.onclick = () => openTaskModal(b.dataset.taskEdit));
+    } catch (e) { if (el("teamMsg")) el("teamMsg").textContent = e.message || String(e); }
+  }
+  async function openTaskModal(id = null) {
+    await fillTaskOwners();
+    el("taskModal").style.display = "grid"; el("taskMsg").textContent = "—"; el("taskId").value = id || "";
+    if (!id) { el("taskModalTitle").textContent = "Nova actividade"; el("taskTitle").value = ""; el("taskDescription").value = ""; el("taskStatus").value = "todo"; el("taskPriority").value = "medium"; el("taskDue").value = ""; el("taskNote").value = ""; el("btnDeleteTask").style.display = "none"; return; }
+    const { data, error } = await supabase.from("tasks").select("*").eq("id", id).single(); if (error) { el("taskMsg").textContent = error.message; return; }
+    el("taskModalTitle").textContent = "Editar actividade"; el("taskTitle").value = data.title || ""; el("taskDescription").value = data.description || ""; el("taskStatus").value = data.status || "todo"; el("taskPriority").value = data.priority || "medium"; el("taskOwner").value = data.owner_id || "";
+    if (data.due_at) { const d = new Date(data.due_at); el("taskDue").value = `${ymd(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; } else el("taskDue").value = "";
+    el("taskNote").value = ""; el("btnDeleteTask").style.display = "inline-flex";
+  }
+  async function saveTask() {
+    try {
+      const id = el("taskId").value; const due = el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null;
+      const payload = { workspace_id: workspaceId, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), status: el("taskStatus").value, priority: el("taskPriority").value, due_at: due, owner_id: el("taskOwner").value, updated_at: new Date().toISOString() };
+      if (!payload.title) { el("taskMsg").textContent = "Título obrigatório."; return; }
+      if (payload.status === "done") payload.completed_at = new Date().toISOString();
+      let savedId = id;
+      if (id) { const { error } = await supabase.from("tasks").update(payload).eq("id", id).eq("workspace_id", workspaceId); if (error) throw error; }
+      else { payload.created_at = new Date().toISOString(); const { data, error } = await supabase.from("tasks").insert(payload).select("id").single(); if (error) throw error; savedId = data?.id; }
+      const note = el("taskNote").value.trim();
+      if (note && savedId) await supabase.from("task_updates").insert({ workspace_id: workspaceId, task_id: savedId, note });
+      el("taskModal").style.display = "none"; await renderTasks(); await renderTeam(); await renderDash();
+    } catch (e) { el("taskMsg").textContent = e.message || String(e); }
+  }
+  async function requestDeleteTask() {
+    const id = el("taskId").value; if (!id) return;
+    const reason = prompt("Motivo do pedido de remoção:"); if (!reason) return;
+    const { error } = await supabase.from("task_delete_requests").insert({ workspace_id: workspaceId, task_id: id, reason });
+    el("taskMsg").textContent = error ? error.message : "Pedido enviado ✅";
+  }
+  async function renderApprovals() {
+    try {
+      if (!(await isAdmin())) { el("approvalsMsg").textContent = "Área reservada a administradores."; return; }
+      const profiles = await fetchProfiles();
+      const pend = profiles.filter((p) => !p.active);
+      el("approvalsList").innerHTML = pend.length ? pend.map((p) => `<div class="item"><div><div class="item-title">${escapeHtml(p.name || p.user_id)}</div><div class="item-meta">${p.user_id}</div></div><button class="btn sm primary" data-approve-user="${p.user_id}">Aprovar</button></div>`).join("") : '<p class="muted">Sem utilizadores pendentes.</p>';
+      el("approvalsMsg").textContent = `${pend.length} pendente(s).`;
+      el("approvalsList").querySelectorAll("[data-approve-user]").forEach((b) => b.onclick = async () => { await supabase.from("profiles").update({ active: true }).eq("workspace_id", workspaceId).eq("user_id", b.dataset.approveUser); renderApprovals(); });
+      const { data: reqs, error } = await supabase.from("task_delete_requests").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }); if (error) throw error;
+      el("deleteReqList").innerHTML = (reqs || []).length ? reqs.map((r) => `<div class="item"><div><div class="item-title">Pedido: ${escapeHtml(r.task_id)}</div><div class="item-meta">${escapeHtml(r.reason)} • ${r.status || "pending"}</div></div><button class="btn sm danger" data-approve-del="${r.id}" data-task="${r.task_id}">Apagar tarefa</button></div>`).join("") : '<p class="muted">Sem pedidos de remoção.</p>';
+      el("deleteReqMsg").textContent = `${(reqs || []).length} pedido(s).`;
+      el("deleteReqList").querySelectorAll("[data-approve-del]").forEach((b) => b.onclick = async () => { await supabase.from("tasks").delete().eq("id", b.dataset.task).eq("workspace_id", workspaceId); await supabase.from("task_delete_requests").update({ status: "approved" }).eq("id", b.dataset.approveDel); renderApprovals(); });
+    } catch (e) { el("approvalsMsg").textContent = e.message || String(e); }
+  }
+
   // ---------- Reports ----------
   const renderReports = () => {
     fillSelects();
@@ -991,7 +1117,7 @@ const deleteBooking = async () => {
     if (el("repMeta2")) el("repMeta2").textContent = "—";
   };
 
-  const runReports = () => {
+  const runReports = async () => {
     const from = el("repFrom")?.value;
     const to = el("repTo")?.value;
     const rid = el("repResource")?.value || "all";
@@ -1002,77 +1128,51 @@ const deleteBooking = async () => {
 
     const fromD = new Date(from + "T00:00:00");
     const toD = new Date(to + "T23:59:59");
+    try {
+      let rows = await fetchBookingsBetween(fromD, toD);
+      rows = rows.filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status));
+      if (rid !== "all") rows = rows.filter((x) => x.resource_id === rid);
 
-    let rows = db.bookings
-      .filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status))
-      .filter((x) => {
-        const s = new Date(x.start);
-        return s >= fromD && s <= toD;
-      })
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
+      const totalBookings = rows.reduce((acc, x) => acc + Number(x.total_price || 0), 0);
+      const totalCoworkDay = revenueCoworkDaypassesBetween(fromD, toD);
+      const totalAll = totalBookings + totalCoworkDay;
 
-    if (rid !== "all") rows = rows.filter((x) => x.resourceId === rid);
+      if (el("repTotal2")) el("repTotal2").textContent = MT(totalAll);
+      if (el("repMeta2")) el("repMeta2").textContent = `${from} → ${to} • Reservas: ${MT(totalBookings)} • Cowork diárias: ${MT(totalCoworkDay)}`;
 
-    const totalBookings = rows.reduce((acc, x) => acc + Number(x.price || 0), 0);
-    const totalCoworkDay = revenueCoworkDaypassesBetween(fromD, toD);
-    const totalAll = totalBookings + totalCoworkDay;
+      const host = el("reportsList");
+      if (!host) return;
+      host.innerHTML = "";
+      if (!rows.length && !db.cowork_daypasses.length) {
+        if (el("reportsMsg")) el("reportsMsg").textContent = "Sem dados no intervalo.";
+        return;
+      }
+      if (el("reportsMsg")) el("reportsMsg").textContent = "";
 
-    if (el("repTotal2")) el("repTotal2").textContent = MT(totalAll);
-    if (el("repMeta2")) el("repMeta2").textContent = `${from} → ${to} • Cowork diárias: ${MT(totalCoworkDay)}`;
+      rows.forEach((bk) => {
+        const r = getResource(bk.resource_id);
+        const item = document.createElement("div");
+        item.className = "item";
+        item.innerHTML = `<div><div class="item-title">${escapeHtml(r?.name || "—")} • ${escapeHtml(bk.client_name || "—")}</div><div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)}</div></div><button class="btn sm" data-edit="${bk.id}">Abrir</button>`;
+        host.appendChild(item);
+      });
+      host.querySelectorAll("[data-edit]").forEach((btn) => { btn.onclick = () => { showScreen("bookings"); openBookingModal(btn.getAttribute("data-edit")); }; });
 
-    const host = el("reportsList");
-    if (!host) return;
-    host.innerHTML = "";
-
-    if (!rows.length && !db.cowork_daypasses.length) {
-      if (el("reportsMsg")) el("reportsMsg").textContent = "Sem dados no intervalo.";
-      return;
-    }
-    if (el("reportsMsg")) el("reportsMsg").textContent = "";
-
-    rows.forEach((bk) => {
-      const r = getResource(bk.resourceId);
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">${r?.name || "—"} • ${bk.client}</div>
-          <div class="item-meta">${fmt(bk.start)} → ${fmt(bk.end)} • ${MT(bk.price)}</div>
-        </div>
-        <button class="btn sm" data-edit="${bk.id}">Abrir</button>
-      `;
-      host.appendChild(item);
-    });
-
-    host.querySelectorAll("[data-edit]").forEach((btn) => {
-      btn.onclick = () => {
-        showScreen("bookings");
-        openBookingModal(btn.getAttribute("data-edit"));
-      };
-    });
-
-    const dayRows = db.cowork_daypasses
-      .filter((x) => {
+      db.cowork_daypasses.filter((x) => {
         const t = new Date(x.date + "T12:00:00");
         return t >= fromD && t <= toD;
-      })
-      .sort((a, b) => (a.date > b.date ? 1 : -1));
-
-    dayRows.forEach((x) => {
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">Cowork (diária) • ${x.name}</div>
-          <div class="item-meta">${x.date} • ${x.seats} lugar(es) • ${MT(x.price)} ${x.note ? "• " + x.note : ""}</div>
-        </div>
-        <span class="badge ok">cowork-day</span>
-      `;
-      host.appendChild(item);
-    });
+      }).sort((a, b) => (a.date > b.date ? 1 : -1)).forEach((x) => {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.innerHTML = `<div><div class="item-title">Cowork (diária) • ${escapeHtml(x.name)}</div><div class="item-meta">${x.date} • ${x.seats} lugar(es) • ${MT(x.price)} ${x.note ? "• " + escapeHtml(x.note) : ""}</div></div><span class="badge ok">cowork-day</span>`;
+        host.appendChild(item);
+      });
+    } catch (e) {
+      if (el("reportsMsg")) el("reportsMsg").textContent = e.message || String(e);
+    }
   };
 
-  const exportCSV = () => {
+  const exportCSV = async () => {
     const from = el("repFrom")?.value;
     const to = el("repTo")?.value;
     const rid = el("repResource")?.value || "all";
@@ -1080,71 +1180,17 @@ const deleteBooking = async () => {
 
     const fromD = new Date(from + "T00:00:00");
     const toD = new Date(to + "T23:59:59");
-
-    let rows = db.bookings
-      .filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status))
-      .filter((x) => {
-        const s = new Date(x.start);
-        return s >= fromD && s <= toD;
-      })
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
-
-    if (rid !== "all") rows = rows.filter((x) => x.resourceId === rid);
-
-    const dayRows = db.cowork_daypasses
-      .filter((x) => {
-        const t = new Date(x.date + "T12:00:00");
-        return t >= fromD && t <= toD;
-      })
-      .sort((a, b) => (a.date > b.date ? 1 : -1));
-
-    const header = ["type", "id", "resource", "client", "date", "start", "end", "status", "seats", "price", "note"];
-    const lines = [header.join(",")];
-
-    rows.forEach((bk) => {
-      const r = getResource(bk.resourceId);
-      const vals = [
-        "booking",
-        bk.id,
-        `"${String(r?.name || "").replace(/"/g, '""')}"`,
-        `"${String(bk.client || "").replace(/"/g, '""')}"`,
-        "",
-        bk.start,
-        bk.end,
-        bk.status,
-        "",
-        Number(bk.price || 0),
-        ""
-      ];
-      lines.push(vals.join(","));
-    });
-
-    dayRows.forEach((x) => {
-      const vals = [
-        "cowork-day",
-        x.id,
-        `"Cowork"`,
-        `"${String(x.name || "").replace(/"/g, '""')}"`,
-        x.date,
-        "",
-        "",
-        "confirmed",
-        Number(x.seats || 0),
-        Number(x.price || 0),
-        `"${String(x.note || "").replace(/"/g, '""')}"`,
-      ];
-      lines.push(vals.join(","));
-    });
-
+    let rows = await fetchBookingsBetween(fromD, toD);
+    rows = rows.filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status));
+    if (rid !== "all") rows = rows.filter((x) => x.resource_id === rid);
+    const dayRows = db.cowork_daypasses.filter((x) => { const t = new Date(x.date + "T12:00:00"); return t >= fromD && t <= toD; }).sort((a, b) => (a.date > b.date ? 1 : -1));
+    const csv = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const lines = [["type", "id", "resource", "client", "date", "start", "end", "status", "seats", "price", "note"].join(",")];
+    rows.forEach((bk) => { const r = getResource(bk.resource_id); lines.push(["booking", bk.id, csv(r?.name || ""), csv(bk.client_name || ""), "", bk.start_at, bk.end_at, bk.status, "", Number(bk.total_price || 0), ""].join(",")); });
+    dayRows.forEach((x) => lines.push(["cowork-day", x.id, csv("Cowork"), csv(x.name || ""), x.date, "", "", "confirmed", Number(x.seats || 0), Number(x.price || 0), csv(x.note || "")].join(",")));
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `relatorio_${from}_a_${to}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const url = URL.createObjectURL(blob); const a = document.createElement("a");
+    a.href = url; a.download = `relatorio_${from}_a_${to}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   };
 
   // ---------- backup/reset ----------
@@ -1269,6 +1315,18 @@ const deleteBooking = async () => {
       });
     if (el("btnAddCoworkDay")) el("btnAddCoworkDay").onclick = addCoworkDaypass;
 
+    // tasks/team/approvals
+    if (el("btnCreateTask")) el("btnCreateTask").onclick = () => openTaskModal(null);
+    if (el("btnCloseTask")) el("btnCloseTask").onclick = () => { el("taskModal").style.display = "none"; };
+    if (el("btnSaveTask")) el("btnSaveTask").onclick = saveTask;
+    if (el("btnDeleteTask")) el("btnDeleteTask").onclick = requestDeleteTask;
+    if (el("taskStatusFilter")) el("taskStatusFilter").onchange = renderTasks;
+    if (el("taskSearch")) el("taskSearch").oninput = renderTasks;
+    if (el("btnReloadTeam")) el("btnReloadTeam").onclick = renderTeam;
+    if (el("teamUserFilter")) el("teamUserFilter").onchange = renderTeam;
+    if (el("teamTaskStatusFilter")) el("teamTaskStatusFilter").onchange = renderTeam;
+    if (el("btnReloadApprovals")) el("btnReloadApprovals").onclick = renderApprovals;
+
     // reports
     if (el("btnRunReports")) el("btnRunReports").onclick = runReports;
     if (el("btnExportCSV")) el("btnExportCSV").onclick = exportCSV;
@@ -1286,6 +1344,7 @@ const deleteBooking = async () => {
       el("memberModal").addEventListener("click", (e) => {
         if (e.target.id === "memberModal") closeMemberModal();
       });
+    if (el("taskModal")) el("taskModal").addEventListener("click", (e) => { if (e.target.id === "taskModal") el("taskModal").style.display = "none"; });
   };
 
   // ---------- INIT (corrigido para overlay) ----------

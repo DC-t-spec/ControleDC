@@ -12,13 +12,10 @@ drop table if exists public.cowork_members cascade;
 drop table if exists public.reservations cascade;
 drop table if exists public.resources cascade;
 drop table if exists public.profiles cascade;
+drop table if exists public.workspaces cascade;
+drop table if exists public.bookings cascade;
+drop table if exists public.db_snapshots cascade;
 drop table if exists public.companies cascade;
-do $$
-begin
-  execute format('drop table if exists public.%I cascade', ('book' || 'ings'));
-  execute format('drop table if exists public.%I cascade', ('db' || '_snap' || 'shots'));
-  execute format('drop table if exists public.%I cascade', ('work' || 'spaces'));
-end $$;
 
 drop function if exists public.set_updated_at() cascade;
 drop function if exists public.my_company_id() cascade;
@@ -29,6 +26,7 @@ create table public.companies (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   code text not null unique,
+  active boolean not null default true,
   created_at timestamptz not null default now()
 );
 
@@ -119,7 +117,7 @@ create table public.task_delete_requests (
   created_at timestamptz not null default now()
 );
 
-insert into public.companies (name, code) values ('XHUB', 'XHUB-26');
+insert into public.companies (name, code, active) values ('XHUB', 'XHUB-26', true);
 insert into public.resources (company_id, name, type, code, active)
 select id, 'Sala de Reuniões', 'room', 'r_meet', true from public.companies where code = 'XHUB-26'
 union all

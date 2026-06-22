@@ -1,1647 +1,342 @@
 (() => {
   "use strict";
 
-  const KEY = "dc_space_control_v1";
-  let db = null;
-
-  // ===============================
-  // SUPABASE (Cloud + Login)
-  // ===============================
   const SUPABASE_URL = "https://etjkuqdaadiehdpttkon.supabase.co";
   const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV0amt1cWRhYWRpZWhkcHR0a29uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNDY0ODIsImV4cCI6MjA5NzcyMjQ4Mn0.uS2olKKCvrgLgwjr2yjj27Mm0ZXoSIp5LI9w5yPLlac";
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
   let session = null;
-  let workspaceId = null;
+  let profile = null;
+  let company = null;
+  let resources = [];
+  let profiles = [];
 
-  // ---------- helpers ----------
   const el = (id) => document.getElementById(id);
-  const uid = () => (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
   const pad2 = (n) => String(n).padStart(2, "0");
-  const MT = (n) => `${Number(n || 0).toLocaleString("pt-PT")} MT`;
-
-  const fmt = (iso) => {
-    const d = new Date(iso);
-    return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  };
-
   const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const fmt = (v) => new Date(v).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" });
+  const money = (v) => `${Number(v || 0).toLocaleString("pt-PT")} MT`;
+  const html = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  const isAdmin = () => profile?.role === "admin";
+  const currentUserId = () => session?.user?.id || null;
 
-  function showAuth() {
-    const s = el("authScreen");
-    const app = el("appRoot");
-    if (s) {
-      s.classList.remove("hidden");
-      s.setAttribute("aria-hidden", "false");
-    }
-    if (app) app.classList.add("app-locked");
-    document.body.style.overflow = "hidden";
-  }
+  function message(id, text) { const node = el(id); if (node) node.textContent = text; }
+  function showAuth(text = "—") { el("authScreen")?.classList.remove("hidden"); el("appRoot")?.classList.add("app-locked"); message("authMsg", text); }
+  function hideAuth() { el("authScreen")?.classList.add("hidden"); el("appRoot")?.classList.remove("app-locked"); }
+  function openModal(id) { const node = el(id); if (node) node.style.display = "grid"; }
+  function closeModal(id) { const node = el(id); if (node) node.style.display = "none"; }
 
-  function hideAuth() {
-    const s = el("authScreen");
-    const app = el("appRoot");
-    if (s) {
-      s.classList.add("hidden");
-      s.setAttribute("aria-hidden", "true");
-    }
-    if (app) app.classList.remove("app-locked");
-    document.body.style.overflow = "";
-  }
-
-  async function getSessionSafe() {
-    try {
-      const { data, error } = await supabase.auth.getSession();
-      if (error) return null;
-      return data?.session || null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function refreshSession() {
-    session = await getSessionSafe();
+  async function loadSession() {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    session = data.session;
     return session;
   }
 
-async function getMyWorkspaceId() {
-  const { data: u, error: e0 } = await supabase.auth.getUser();
-  if (e0) throw e0;
-
-  const user = u?.user;
-  if (!user) return null;
-
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("workspace_id, role, active")
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  console.log("profile found:", data, error);
-
-  if (error) throw error;
-  return data?.workspace_id || null;
-}
-  
-async function joinWorkspaceByCode(code) {
-  const cc = String(code || "").trim().toUpperCase();
-  if (!cc) throw new Error("Código da empresa é obrigatório.");
-
-  const { data: u, error: e0 } = await supabase.auth.getUser();
-  if (e0) throw e0;
-
-  const user = u?.user;
-  if (!user) throw new Error("Sem sessão.");
-
-  const { data: ws, error: e1 } = await supabase
-    .from("workspaces")
-    .select("id, code, active")
-    .eq("code", cc)
-    .eq("active", true)
-    .maybeSingle();
-
-  console.log("workspace found:", ws, e1, "code typed:", cc);
-
-  if (e1) throw new Error(e1.message || "Erro ao validar código.");
-  if (!ws) throw new Error("Código inválido ou empresa não encontrada.");
-
-  const { error: e2 } = await supabase
-    .from("profiles")
-    .upsert(
-      {
-        user_id: user.id,
-        workspace_id: ws.id,
-        role: "member",
-        active: true
-      },
-      { onConflict: "user_id" }
-    );
-
-  if (e2) throw e2;
-
-  return ws.id;
-}
-  async function signUp(email, pass, code) {
-    const { error } = await supabase.auth.signUp({ email, password: pass });
+  async function loadProfile() {
+    const userId = currentUserId();
+    if (!userId) return null;
+    const { data, error } = await supabase.from("profiles").select("*, companies(id,name,code)").eq("user_id", userId).maybeSingle();
     if (error) throw error;
-
-    await refreshSession();
-    if (!session) return { needsEmailConfirm: true };
-
-    workspaceId = await joinWorkspaceByCode(code);
-    return { ok: true };
+    profile = data;
+    company = data?.companies || null;
+    if (company) message("companyLabel", `Empresa: ${company.name}`);
+    return data;
   }
 
-  async function signIn(email, pass, code) {
-    const { error } = await supabase.auth.signInWithPassword({ email, password: pass });
+  async function signup() {
+    const email = el("authEmail").value.trim().toLowerCase();
+    const password = el("authPass").value;
+    const code = el("authCode").value.trim().toUpperCase();
+    if (!email || !password || !code) throw new Error("Preencha email, senha e código da empresa.");
+
+    const { data: foundCompany, error: companyError } = await supabase.from("companies").select("id,name,code").eq("code", code).maybeSingle();
+    if (companyError) throw companyError;
+    if (!foundCompany) throw new Error("Código da empresa inválido.");
+
+    const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) throw error;
+    const user = data.user;
+    if (!user) throw new Error("Conta criada. Confirme o email e depois faça login.");
 
-    await refreshSession();
-    workspaceId = await getMyWorkspaceId();
-    if (!workspaceId) workspaceId = await joinWorkspaceByCode(code);
-    return { ok: true };
-  }
-
-  async function signOut() {
+    const name = email.split("@")[0] || "utilizador";
+    const { error: profileError } = await supabase.from("profiles").upsert({
+      user_id: user.id,
+      company_id: foundCompany.id,
+      name,
+      role: "user",
+      status: "pending"
+    }, { onConflict: "user_id" });
+    if (profileError) throw profileError;
     await supabase.auth.signOut();
     session = null;
-    workspaceId = null;
+    throw new Error("Conta criada. Aguarde aprovação do administrador.");
   }
 
-  // ---------- db ----------
-  const emptyDB = () => ({
-    meta: { version: "1.1", updatedAt: new Date().toISOString() },
-    resources: [
-      { id: "r_meet", code: "r_meet", type: "room", name: "Sala de Reuniões", priceHour: 800, bufferMin: 10 },
-      { id: "r_studio", code: "r_studio", type: "studio", name: "Estúdio", priceHour: 1500, bufferMin: 15 },
-      { id: "r_cowork", code: "r_cowork", type: "cowork", name: "Cowork", capacity: 20, priceMonth: 6000, priceDay: 300 }
-    ],
-    cowork_members: [],
-    cowork_daypasses: [],
-    reservations: []
-  });
-
-  const loadDB = () => {
-    try {
-      const raw = localStorage.getItem(KEY);
-      if (!raw) return emptyDB();
-      const x = JSON.parse(raw);
-
-      x.meta ||= { version: "1.1", updatedAt: new Date().toISOString() };
-      x.resources ||= emptyDB().resources;
-      x.cowork_members ||= [];
-      x.cowork_daypasses ||= [];
-      x.reservations ||= x.bookings || [];
-      delete x.bookings;
-      return x;
-    } catch {
-      return emptyDB();
-    }
-  };
-
-  const saveDB = () => {
-    if (!db) return;
-    db.meta ||= { version: "1.1", updatedAt: new Date().toISOString() };
-    db.meta.updatedAt = new Date().toISOString();
-    localStorage.setItem(KEY, JSON.stringify(db));
-    if (el("dbUpdated")) el("dbUpdated").textContent = `Atualizado: ${fmt(db.meta.updatedAt)}`;
-    // 🔜 quando quiseres sincronizar sempre:
-    // cloudPushSafe();
-  };
-
-function getResourceByCode(code) {
-  return db?.resources?.find((r) => r.code === code || r.id === code) || null;
-}
-  
-  const getResource = (id) => db?.resources?.find((r) => r.id === id);
-  const getCowork = () => db?.resources?.find((r) => r.type === "cowork");
-  // ------- LEGACY SNAPSHOT CLOUD (isolado) -------
-  // A base nova é normalizada (resources, reservations, cowork_members, tasks, etc.).
-  // Mantemos estes stubs para não misturar db_snapshots/workspace com a fonte de verdade.
-  async function cloudPull() { return false; }
-  async function cloudPush() { return; }
-  async function cloudPullSafe() { return false; }
-  async function cloudPushSafe() { return; }
-
-  // ---------- datas/horas ----------
-  const startOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
-  };
-  const endOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(23, 59, 59, 999);
-    return x;
-  };
-  const startOfWeek = (d) => {
-    const x = startOfDay(d);
-    const day = x.getDay(); // 0=Dom
-    const diff = (day === 0 ? -6 : 1) - day;
-    x.setDate(x.getDate() + diff);
-    return x;
-  };
-  const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
-  const endOfMonth = (d) => new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
-  const hoursBetween = (aISO, bISO) => Math.max(0, (new Date(bISO) - new Date(aISO)) / 36e5);
-  const overlaps = (aS, aE, bS, bE) => new Date(aS) < new Date(bE) && new Date(aE) > new Date(bS);
-  const withBuffer = (sISO, eISO, bufferMin) => {
-    const s = new Date(sISO), e = new Date(eISO);
-    s.setMinutes(s.getMinutes() - bufferMin);
-    e.setMinutes(e.getMinutes() + bufferMin);
-    return { s: s.toISOString(), e: e.toISOString() };
-  };
-  const toISOfromLocal = (dtLocal) => new Date(dtLocal).toISOString();
-
-  // ---------- selects ----------
-  const fillSelects = () => {
-    if (!db) return;
-
-    const s1 = el("bkResource");
-    if (s1) {
-      s1.innerHTML = "";
-      db.resources.filter((r) => ["room", "studio"].includes(r.type)).forEach((r) => {
-        const opt = document.createElement("option");
-        opt.value = r.id;
-        opt.textContent = r.name;
-        s1.appendChild(opt);
-      });
-    }
-
-    const s2 = el("bkFilterResource");
-    if (s2) {
-      s2.innerHTML = `<option value="all">Todos</option>`;
-      db.resources.filter((r) => ["room", "studio"].includes(r.type)).forEach((r) => {
-        const opt = document.createElement("option");
-        opt.value = r.id;
-        opt.textContent = r.name;
-        s2.appendChild(opt);
-      });
-    }
-
-    const s3 = el("repResource");
-    if (s3) {
-      s3.innerHTML = `<option value="all">Todos</option>`;
-      db.resources.filter((r) => ["room", "studio"].includes(r.type)).forEach((r) => {
-        const opt = document.createElement("option");
-        opt.value = r.id;
-        opt.textContent = r.name;
-        s3.appendChild(opt);
-      });
-    }
-  };
-
-  // ---------- router/menu (sem auth) ----------
-  const showScreen = (id) => {
-    // se não há sessão, só mostra overlay
-    if (!session) {
-      showAuth();
-      return;
-    }
-
-    // troca telas da app
-    const screens = ["dash", "bookings", "cowork", "tasks", "team", "approvals", "reports"];
-    screens.forEach((k) => {
-      const node = el("scr-" + k);
-      if (node) node.hidden = k !== id;
-    });
-
-    document.querySelectorAll(".m-item[data-go]").forEach((b) => b.classList.remove("active"));
-    document.querySelector(`.m-item[data-go="${id}"]`)?.classList.add("active");
-
-    if (id === "dash") renderDash();
-    if (id === "bookings") renderBookings();
-    if (id === "cowork") renderCowork();
-    if (id === "tasks") renderTasks();
-    if (id === "team") renderTeam();
-    if (id === "approvals") renderApprovals();
-    if (id === "reports") renderReports();
-  };
-
-  // ---------- render geral ----------
-  function renderAll() {
-    fillSelects();
-    renderDash();
-    // mantém a tela atual (se existir), senão dash
-    const dash = el("scr-dash");
-    const bookings = el("scr-bookings");
-    const cowork = el("scr-cowork");
-    const tasks = el("scr-tasks");
-    const team = el("scr-team");
-    const approvals = el("scr-approvals");
-    const reports = el("scr-reports");
-    if (dash && bookings && cowork && tasks && team && approvals && reports) {
-      if (!dash.hidden) renderDash();
-      else if (!bookings.hidden) renderBookings();
-      else if (!cowork.hidden) renderCowork();
-      else if (!tasks.hidden) renderTasks();
-      else if (!team.hidden) renderTeam();
-      else if (!approvals.hidden) renderApprovals();
-      else if (!reports.hidden) renderReports();
-      else showScreen("dash");
-    } else {
-      showScreen("dash");
-    }
-  }
-  // ---------- cowork (mensalistas) ----------
-  const coworkUsedSeats = () =>
-    db.cowork_members.filter((m) => m.active).reduce((acc, m) => acc + Number(m.seats || 0), 0);
-
-  const coworkAvailability = () => {
-    const cw = getCowork();
-    const cap = Number(cw?.capacity || 0);
-    const used = coworkUsedSeats();
-    return { cap, used, free: Math.max(0, cap - used) };
-  };
-
-  const coworkMonthlyRevenue = () =>
-    db.cowork_members.filter((m) => m.active).reduce((acc, m) => acc + Number(m.price || 0), 0);
-
-  // ---------- cowork (diárias) ----------
-  const seatsCoworkDaypassesOn = (dayYMD) =>
-    db.cowork_daypasses.filter((x) => x.date === dayYMD).reduce((acc, x) => acc + Number(x.seats || 0), 0);
-
-  const revenueCoworkDaypassesBetween = (from, to) => {
-    const a = new Date(from).getTime();
-    const b = new Date(to).getTime();
-    return db.cowork_daypasses
-      .filter((x) => {
-        const t = new Date(x.date + "T12:00:00").getTime();
-        return t >= a && t <= b;
-      })
-      .reduce((acc, x) => acc + Number(x.price || 0), 0);
-  };
-
-  const renderCoworkDaypasses = () => {
-    if (!el("cwDayList")) return;
-    const host = el("cwDayList");
-    host.innerHTML = "";
-
-    const day = el("cwDayDate")?.value || ymd(new Date());
-    const rows = db.cowork_daypasses
-      .filter((x) => x.date === day)
-      .slice()
-      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-
-    if (!rows.length) {
-      if (el("cwDayMsg")) el("cwDayMsg").textContent = "Sem diárias registadas para esta data.";
-      return;
-    }
-
-    const total = rows.reduce((acc, x) => acc + Number(x.price || 0), 0);
-    if (el("cwDayMsg")) el("cwDayMsg").textContent = `${rows.length} diária(s) • Total: ${MT(total)}`;
-
-    rows.forEach((x) => {
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">${x.name} • ${x.seats} lugar(es)</div>
-          <div class="item-meta">${x.date} • ${MT(x.price)} ${x.note ? "• " + x.note : ""}</div>
-        </div>
-        <button class="btn sm danger" data-del-day="${x.id}">Remover</button>
-      `;
-      host.appendChild(item);
-    });
-
-    host.querySelectorAll("[data-del-day]").forEach((btn) => {
-      btn.onclick = () => {
-        const id = btn.getAttribute("data-del-day");
-        db.cowork_daypasses = db.cowork_daypasses.filter((x) => x.id !== id);
-        saveDB();
-        renderCoworkDaypasses();
-        renderDash();
-      };
-    });
-  };
-
-  const addCoworkDaypass = () => {
-    const cw = getCowork();
-    const date = el("cwDayDate")?.value || ymd(new Date());
-    const name = (el("cwDayName")?.value || "").trim();
-    const seats = Math.max(1, Number(el("cwDaySeats")?.value || 1));
-    const note = (el("cwDayNote")?.value || "").trim();
-
-    const fallback = Number(cw?.priceDay || 0);
-    const priceInput = el("cwDayPrice")?.value;
-    const price = Math.max(0, Number(priceInput || fallback));
-
-    if (!name) {
-      if (el("cwDayMsg")) el("cwDayMsg").textContent = "Nome/Empresa obrigatório.";
-      return;
-    }
-
-    const av = coworkAvailability();
-    const daySeats = seatsCoworkDaypassesOn(date);
-    const cap = Number(cw?.capacity || 0);
-
-    if (av.used + daySeats + seats > cap) {
-      const free = Math.max(0, cap - (av.used + daySeats));
-      if (el("cwDayMsg")) el("cwDayMsg").textContent = `Sem lugares suficientes para ${date}. Livres: ${free}`;
-      return;
-    }
-
-    db.cowork_daypasses.push({ id: uid(), date, name, seats, price, note });
-    saveDB();
-
-    if (el("cwDayName")) el("cwDayName").value = "";
-    if (el("cwDaySeats")) el("cwDaySeats").value = 1;
-    if (el("cwDayPrice")) el("cwDayPrice").value = "";
-    if (el("cwDayNote")) el("cwDayNote").value = "";
-
-    renderCoworkDaypasses();
-    renderDash();
-  };
-
-  // ---------- bookings ----------
-  const hasConflict = (resourceId, startISO, endISO, ignoreId = null) => {
-    const r = getResource(resourceId);
-    if (!r || r.type === "cowork") return false;
-
-    const buf = Number(r.bufferMin || 0);
-    const A = withBuffer(startISO, endISO, buf);
-
-    return (db.reservations || [])
-      .filter((b) => (b.resource_id || b.resourceId) === resourceId)
-      .filter((b) => b.id !== ignoreId)
-      .filter((b) => ["confirmed", "pending", "checked_in"].includes(b.status))
-      .some((b) => {
-        const B = withBuffer(b.start_at || b.start, b.end_at || b.end, buf);
-        return overlaps(A.s, A.e, B.s, B.e);
-      });
-  };
-
- 
-
- 
-
- 
-
-  // ---------- UI helper ----------
-  const setStatusPill = (hostId, busy) => {
-    const host = el(hostId);
-    if (!host) return;
-    const dot = `<span class="dot" style="background:${busy ? "var(--bad)" : "var(--ok)"}"></span>`;
-    host.innerHTML = `${dot} ${busy ? "OCUPADA" : "LIVRE"}`;
-    host.className = "status";
-  };
-
-  // ---------- Dashboard ----------
-
-const renderTodayList = async () => {
-  const host = el("todayList");
-  if (!host) return;
-  host.innerHTML = "";
-
-  try {
-    const today = new Date();
-    const a = startOfDay(today);
-    const b = endOfDay(today);
-
-    const rows = await fetchBookingsBetween(a, b);
-
-    if (el("todayMeta")) el("todayMeta").textContent = `${rows.length} reserva(s) hoje`;
-
-    if (!rows.length) {
-      if (el("todayMsg")) el("todayMsg").textContent = "Sem reservas para hoje.";
-      return;
-    }
-
-    if (el("todayMsg")) el("todayMsg").textContent = "";
-
-    rows.forEach((bk) => {
-      const r = getResource(bk.resource_id);
-      const statusClass =
-        bk.status === "confirmed" ? "ok" :
-        bk.status === "pending" ? "warn" :
-        bk.status === "cancelled" ? "bad" : "warn";
-
-      const item = document.createElement("div");
-      item.className = "item";
-      item.innerHTML = `
-        <div>
-          <div class="item-title">${r?.name || "—"} • ${bk.client_name || "—"}</div>
-          <div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
-        </div>
-        <button class="btn sm" data-edit="${bk.id}">Abrir</button>
-      `;
-      host.appendChild(item);
-    });
-
-    host.querySelectorAll("[data-edit]").forEach((btn) => {
-      btn.onclick = () => {
-        showScreen("bookings");
-        openBookingModal(btn.getAttribute("data-edit"));
-      };
-    });
-  } catch (err) {
-    if (el("todayMsg")) el("todayMsg").textContent = err.message || "Erro ao carregar reservas de hoje.";
-  }
-};
-
-  const renderQuickReport = async (mode) => {
-  const now = new Date();
-  let from, to, label;
-
-  if (mode === "today") {
-    from = startOfDay(now);
-    to = endOfDay(now);
-    label = "Hoje";
-  } else if (mode === "week") {
-    from = startOfWeek(now);
-    const end = new Date(from);
-    end.setDate(from.getDate() + 6);
-    to = endOfDay(end);
-    label = "Esta semana";
-  } else {
-    from = startOfMonth(now);
-    to = endOfMonth(now);
-    label = "Este mês";
-  }
-
-  try {
-    const meet = getResourceByCode("r_meet");
-    const studio = getResourceByCode("r_studio");
-
-    const totalMeet = meet ? await revenueBookingsBetween(from, to, meet.id) : 0;
-    const totalStudio = studio ? await revenueBookingsBetween(from, to, studio.id) : 0;
-
-    const totalRooms = totalMeet + totalStudio;
-    const totalCoworkDay = revenueCoworkDaypassesBetween(from, to);
-    const total = totalRooms + totalCoworkDay;
-
-    if (el("repTotal")) el("repTotal").textContent = MT(total);
-    if (el("repMeta")) el("repMeta").textContent = `${label} • Cowork diárias: ${MT(totalCoworkDay)}`;
-    renderDash._rep = mode;
-  } catch (err) {
-    if (el("repMeta")) el("repMeta").textContent = err.message || "Erro ao calcular resumo.";
-  }
-};
-
-
-const renderDash = async () => {
-  const now = new Date();
-  if (el("nowLabel")) el("nowLabel").textContent = `Agora: ${fmt(now.toISOString())}`;
-  if (el("dashUpdated")) el("dashUpdated").textContent = `Atualizado: ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
-
-  const av = coworkAvailability();
-  if (el("cwOcc")) el("cwOcc").textContent = `${av.used}/${av.cap}`;
-  if (el("cwFree")) el("cwFree").textContent = `${av.free} lugar(es) livres`;
-  if (el("cwRevenue")) el("cwRevenue").textContent = `Receita mensal ativa: ${MT(coworkMonthlyRevenue())}`;
-
-  try {
-    const meet = getResourceByCode("r_meet");
-    const studio = getResourceByCode("r_studio");
-
-    const meetNow = meet ? await nowBookingFor(meet.id, now) : null;
-    const studioNow = studio ? await nowBookingFor(studio.id, now) : null;
-
-    setStatusPill("meetStatus", !!meetNow);
-    setStatusPill("studioStatus", !!studioNow);
-
-    if (el("meetNow")) {
-      el("meetNow").textContent = meetNow
-        ? `Em uso por ${meetNow.client_name} até ${fmt(meetNow.end_at)}`
-        : "Sem uso agora.";
-    }
-
-    if (el("studioNow")) {
-      el("studioNow").textContent = studioNow
-        ? `Em uso por ${studioNow.client_name} até ${fmt(studioNow.end_at)}`
-        : "Sem uso agora.";
-    }
-
-    const meetNext = meet ? await nextBookingFor(meet.id, now) : null;
-    const studioNext = studio ? await nextBookingFor(studio.id, now) : null;
-
-    if (el("meetNext")) {
-      el("meetNext").textContent = meetNext
-        ? `Próxima: ${fmt(meetNext.start_at)} (${meetNext.status})`
-        : "Sem próximas reservas.";
-    }
-
-    if (el("studioNext")) {
-      el("studioNext").textContent = studioNext
-        ? `Próxima: ${fmt(studioNext.start_at)} (${studioNext.status})`
-        : "Sem próximas reservas.";
-    }
-
-    if (!renderDash._rep) renderDash._rep = "today";
-    await renderQuickReport(renderDash._rep);
-    await renderTodayList();
-  } catch (err) {
-    console.error("Erro no dashboard:", err);
-  }
-};
-
-  // ---------- Bookings screen ----------
-  const setBookingDayDefault = () => {
-    if (el("bkDay") && !el("bkDay").value) el("bkDay").value = ymd(new Date());
-  };
-
-  const bookingsForDay = async (dayYMD) => {
-  return await fetchBookingsForDay(dayYMD);
-};
-
-const renderBookings = async () => {
-  fillSelects();
-  setBookingDayDefault();
-  if (!el("bookingsList")) return;
-
-  const day = el("bkDay").value;
-  const rid = el("bkFilterResource")?.value || "all";
-  const st = el("bkFilterStatus")?.value || "all";
-  const q = (el("bkSearch")?.value || "").trim().toLowerCase();
-
-  let rows = await bookingsForDay(day);
-
-  rows = rows
-    .filter((b) => ["room", "studio"].includes(getResource(b.resource_id)?.type))
-    .sort((a, b) => new Date(a.start_at) - new Date(b.start_at));
-
-  if (rid !== "all") rows = rows.filter((b) => b.resource_id === rid);
-  if (st !== "all") rows = rows.filter((b) => b.status === st);
-  if (q) rows = rows.filter((b) => String(b.client_name || "").toLowerCase().includes(q));
-
-  const host = el("bookingsList");
-  host.innerHTML = "";
-
-  if (!rows.length) {
-    if (el("bookingsMsg")) el("bookingsMsg").textContent = "Sem reservas para os filtros atuais.";
-    return;
-  }
-
-  if (el("bookingsMsg")) el("bookingsMsg").textContent = "";
-
-  rows.forEach((bk) => {
-    const r = getResource(bk.resource_id);
-    const statusClass =
-      bk.status === "confirmed" ? "ok" :
-      bk.status === "pending" ? "warn" :
-      bk.status === "cancelled" ? "bad" : "warn";
-
-    const item = document.createElement("div");
-    item.className = "item";
-    item.innerHTML = `
-      <div>
-        <div class="item-title">${r?.name || "—"} • ${bk.client_name}</div>
-        <div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)} • <span class="badge ${statusClass}">${bk.status}</span></div>
-      </div>
-      <button class="btn sm" data-edit="${bk.id}">Abrir</button>
-    `;
-    host.appendChild(item);
-  });
-
-  host.querySelectorAll("[data-edit]").forEach((btn) => {
-    btn.onclick = () => openBookingModal(btn.getAttribute("data-edit"));
-  });
-};
-
-const openBookingModal = async (id = null) => {
-  fillSelects();
-  if (!el("bookingModal")) return;
-
-  if (el("bkMsg")) el("bkMsg").textContent = "—";
-  el("bookingModal").style.display = "grid";
-
-  if (!id) {
-    if (el("bkModalTitle")) el("bkModalTitle").textContent = "Nova reserva";
-    el("bkId").value = "";
-    el("bkClient").value = "";
-    el("bkStatus").value = "confirmed";
-   const meet = getResourceByCode("r_meet");
-el("bkResource").value = meet?.id || "";
-
-    const day = el("bkDay")?.value || ymd(new Date());
-    el("bkStart").value = `${day}T09:00`;
-    el("bkEnd").value = `${day}T10:00`;
-
-    autoPriceFor();
-    if (el("btnDeleteBooking")) el("btnDeleteBooking").style.display = "none";
-    return;
-  }
-
-  try {
-    const bk = await fetchBookingById(id);
-
-    if (el("bkModalTitle")) el("bkModalTitle").textContent = "Editar reserva";
-    el("bkId").value = bk.id;
-    el("bkResource").value = bk.resource_id;
-    el("bkClient").value = bk.client_name || "";
-    el("bkStatus").value = bk.status || "confirmed";
-    el("bkPrice").value = Number(bk.total_price || 0);
-
-    const s = new Date(bk.start_at);
-    const e = new Date(bk.end_at);
-
-    el("bkStart").value = `${ymd(s)}T${pad2(s.getHours())}:${pad2(s.getMinutes())}`;
-    el("bkEnd").value = `${ymd(e)}T${pad2(e.getHours())}:${pad2(e.getMinutes())}`;
-
-    if (el("btnDeleteBooking")) el("btnDeleteBooking").style.display = "inline-flex";
-  } catch (err) {
-    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao abrir reserva.";
-  }
-};
-
-  const closeBookingModal = () => {
-    if (el("bookingModal")) el("bookingModal").style.display = "none";
-  };
-
-  const autoPriceFor = () => {
-    const rid = el("bkResource")?.value;
-    const r = getResource(rid);
-    if (!r) return;
-
-    const s = el("bkStart")?.value;
-    const e = el("bkEnd")?.value;
-    if (!s || !e) return;
-
-    const startISO = toISOfromLocal(s);
-    const endISO = toISOfromLocal(e);
-
-    const hrs = hoursBetween(startISO, endISO);
-    const price = Math.round(hrs * Number(r.priceHour || 0));
-    if (el("bkPrice")) el("bkPrice").value = isFinite(price) ? price : 0;
-  };
-
-const saveBooking = async () => {
-  try {
-    const id = (el("bkId")?.value || "").trim();
-    const rid = el("bkResource")?.value;
-    const client = (el("bkClient")?.value || "").trim();
-    const s = el("bkStart")?.value;
-    const e = el("bkEnd")?.value;
-    const status = el("bkStatus")?.value;
-    const price = Math.max(0, Number(el("bkPrice")?.value || 0));
-
-    if (!rid || !client || !s || !e) {
-      if (el("bkMsg")) el("bkMsg").textContent = "Preenche recurso, cliente, início e fim.";
-      return;
-    }
-
-    const startISO = new Date(s).toISOString();
-    const endISO = new Date(e).toISOString();
-
-    if (new Date(endISO) <= new Date(startISO)) {
-      if (el("bkMsg")) el("bkMsg").textContent = "Fim deve ser depois do início.";
-      return;
-    }
-
-    const payload = {
-      workspace_id: workspaceId,
-      resource_id: rid,
-      client_name: client,
-      start_at: startISO,
-      end_at: endISO,
-      status,
-      total_price: price
-    };
-
-    let error = null;
-
-    if (!id) {
-      ({ error } = await supabase.from("reservations").insert(payload));
-    } else {
-      ({ error } = await supabase
-        .from("reservations")
-        .update(payload)
-        .eq("id", id));
-    }
-
+  async function login() {
+    const email = el("authEmail").value.trim().toLowerCase();
+    const password = el("authPass").value;
+    const code = el("authCode").value.trim().toUpperCase();
+    if (!email || !password || !code) throw new Error("Preencha email, senha e código da empresa.");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
-
-    if (el("bkMsg")) el("bkMsg").textContent = "Guardado ✅";
-    closeBookingModal();
-    await renderDash();
-    await renderBookings();
-  } catch (err) {
-    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao guardar reserva.";
+    await loadSession();
+    const loaded = await loadProfile();
+    if (!loaded?.company_id) throw new Error("Perfil não encontrado para este utilizador.");
+    if (loaded.status !== "approved") throw new Error("Conta pendente de aprovação.");
+    if (company?.code !== code) throw new Error("Código da empresa não corresponde ao seu perfil.");
   }
-};
 
-const deleteBooking = async () => {
-  try {
-    const id = (el("bkId")?.value || "").trim();
-    if (!id) return;
-
-    const { error } = await supabase
-      .from("reservations")
-      .delete()
-      .eq("id", id);
-
-    if (error) throw error;
-
-    closeBookingModal();
-    await renderDash();
-    await renderBookings();
-  } catch (err) {
-    if (el("bkMsg")) el("bkMsg").textContent = err.message || "Erro ao apagar reserva.";
+  async function logout() {
+    await supabase.auth.signOut();
+    session = null; profile = null; company = null; resources = []; profiles = [];
+    showAuth("Sessão terminada.");
   }
-};
 
-  // ---------- Cowork screen ----------
-  const renderCowork = () => {
-    const cw = getCowork();
+  async function loadBaseData() {
+    if (!profile?.company_id) return;
+    const [resourceResult, profileResult] = await Promise.all([
+      supabase.from("resources").select("*").eq("company_id", profile.company_id).eq("active", true).order("name"),
+      supabase.from("profiles").select("user_id,name,role,status").eq("company_id", profile.company_id).order("name")
+    ]);
+    if (resourceResult.error) throw resourceResult.error;
+    if (profileResult.error) throw profileResult.error;
+    resources = resourceResult.data || [];
+    profiles = profileResult.data || [];
+    fillResourceSelects();
+    fillPeopleSelect();
+  }
 
-    if (el("cwCapacity")) el("cwCapacity").value = Number(cw?.capacity || 0);
-    if (el("cwPriceMonth")) el("cwPriceMonth").value = Number(cw?.priceMonth || 0);
-    if (el("cwPriceDay")) el("cwPriceDay").value = Number(cw?.priceDay || 0);
+  function fillResourceSelects() {
+    ["resFilterResource", "reservationResource"].forEach((id) => {
+      const node = el(id); if (!node) return;
+      node.innerHTML = id === "resFilterResource" ? '<option value="all">Todos</option>' : "";
+      resources.filter((r) => r.type !== "cowork").forEach((r) => node.insertAdjacentHTML("beforeend", `<option value="${r.id}">${html(r.name)}</option>`));
+    });
+  }
 
-    if (el("cwDayDate") && !el("cwDayDate").value) el("cwDayDate").value = ymd(new Date());
-    if (el("cwDayPrice") && !el("cwDayPrice").value) el("cwDayPrice").value = Number(cw?.priceDay || 0);
+  function fillPeopleSelect() {
+    const node = el("taskResponsible"); if (!node) return;
+    node.innerHTML = "";
+    profiles.filter((p) => p.status === "approved").forEach((p) => node.insertAdjacentHTML("beforeend", `<option value="${p.user_id}">${html(p.name)}</option>`));
+    if (currentUserId()) node.value = currentUserId();
+  }
 
-    const list = el("membersList");
-    if (list) list.innerHTML = "";
-
-    if (list) {
-      if (!db.cowork_members.length) {
-        if (el("membersMsg")) el("membersMsg").textContent = "Sem mensalistas ainda.";
-      } else {
-        if (el("membersMsg")) el("membersMsg").textContent = "";
-
-        db.cowork_members
-          .slice()
-          .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-          .forEach((m) => {
-            const badge = m.active ? `<span class="badge ok">Ativo</span>` : `<span class="badge warn">Inativo</span>`;
-            const item = document.createElement("div");
-            item.className = "item";
-            item.innerHTML = `
-              <div>
-                <div class="item-title">${m.name}</div>
-                <div class="item-meta">${m.seats} lugar(es) • ${MT(m.price)} / mês</div>
-              </div>
-              <div class="row" style="gap:8px">
-                ${badge}
-                <button class="btn sm" data-edit-member="${m.id}">Editar</button>
-                <button class="btn sm danger" data-del="${m.id}">Remover</button>
-              </div>
-            `;
-            list.appendChild(item);
-          });
-
-        list.querySelectorAll("[data-edit-member]").forEach((btn) => {
-          btn.onclick = () => openMemberModal(btn.getAttribute("data-edit-member"));
-        });
-
-        list.querySelectorAll("[data-del]").forEach((btn) => {
-          btn.onclick = async () => {
-            const id = btn.getAttribute("data-del");
-            try {
-              const { error } = await supabase
-                .from("cowork_members")
-                .delete()
-                .eq("workspace_id", workspaceId)
-                .eq("id", id);
-              if (error) throw error;
-              await loadCoworkMembers();
-              renderCowork();
-              await renderDash();
-            } catch (err) {
-              if (el("membersMsg")) el("membersMsg").textContent = err.message || "Erro ao remover mensalista.";
-            }
-          };
-        });
-      }
-    }
-
-    if (el("cwMsg")) el("cwMsg").textContent = "—";
-    renderCoworkDaypasses();
-  };
-
-  const saveCoworkCapacity = () => {
-    const cw = getCowork();
-    cw.capacity = Math.max(0, Number(el("cwCapacity")?.value || 0));
-    saveDB();
-    if (el("cwMsg")) el("cwMsg").textContent = "Capacidade guardada ✅";
-    renderCowork();
-    renderDash();
-  };
-
-  const saveCoworkPrices = () => {
-    const cw = getCowork();
-    cw.priceMonth = Math.max(0, Number(el("cwPriceMonth")?.value || 0));
-    cw.priceDay = Math.max(0, Number(el("cwPriceDay")?.value || 0));
-    saveDB();
-    if (el("cwMsg")) el("cwMsg").textContent = "Preços guardados ✅";
-    if (el("cwDayPrice") && !el("cwDayPrice").value) el("cwDayPrice").value = Number(cw.priceDay || 0);
-    renderDash();
-  };
-  const openMemberModal = (id = null) => {
-    const cw = getCowork();
-    const member = id ? db.cowork_members.find((m) => m.id === id) : null;
-    if (el("mName")) el("mName").value = member?.name || "";
-    if (el("mSeats")) el("mSeats").value = Number(member?.seats || 1);
-    if (el("mPrice")) el("mPrice").value = Number(member?.price || cw?.priceMonth || 6000);
-    if (el("mActive")) el("mActive").value = String(member?.active ?? true);
-    if (el("mMsg")) el("mMsg").textContent = "—";
-    if (el("memberModal")) {
-      el("memberModal").dataset.memberId = id || "";
-      el("memberModal").style.display = "grid";
-    }
-  };
-
-  const closeMemberModal = () => {
-    if (el("memberModal")) el("memberModal").style.display = "none";
-  };
-
-  const saveMember = async () => {
-    const name = (el("mName")?.value || "").trim();
-    const seats = Math.max(1, Number(el("mSeats")?.value || 1));
-    const price = Math.max(0, Number(el("mPrice")?.value || 0));
-    const active = el("mActive")?.value === "true";
-
-    if (!name) {
-      if (el("mMsg")) el("mMsg").textContent = "Nome obrigatório.";
-      return;
-    }
-
-
-    const id = el("memberModal")?.dataset.memberId || "";
-    const existingSeats = id ? Number(db.cowork_members.find((m) => m.id === id)?.seats || 0) : 0;
-    if (active) {
-      const av = coworkAvailability();
-      if (av.used - existingSeats + seats > av.cap) {
-        if (el("mMsg")) el("mMsg").textContent = `Sem lugares suficientes. Livres agora: ${av.free}`;
-        return;
-      }
-    }
-
-    const payload = { workspace_id: workspaceId, name, seats, price, active };
-    try {
-      let error;
-      if (id) {
-        ({ error } = await supabase
-          .from("cowork_members")
-          .update(payload)
-          .eq("workspace_id", workspaceId)
-          .eq("id", id));
-      } else {
-        ({ error } = await supabase.from("cowork_members").insert(payload));
-      }
-      if (error) throw error;
-      await loadCoworkMembers();
-      closeMemberModal();
-      renderCowork();
-      await renderDash();
-    } catch (err) {
-      if (el("mMsg")) el("mMsg").textContent = err.message || "Erro ao guardar mensalista.";
-    }
-  };
-
-
-
-  // ---------- tasks / team / approvals (DC-Task unificado) ----------
-  const escapeHtml = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-  const isAdmin = async () => (await getMyProfile())?.role === "admin";
-  const taskStatusLabel = (s) => ({ todo: "Por fazer", doing: "Em curso", blocked: "Bloqueada", done: "Concluída", canceled: "Cancelada" }[s] || s || "—");
-  const dueTag = (due, status) => {
-    if (!due || ["done", "canceled"].includes(status)) return "";
-    const diff = new Date(due).getTime() - Date.now();
-    if (diff < 0) return '<span class="badge bad">Atrasada</span>';
-    if (diff <= 48 * 36e5) return '<span class="badge warn">A vencer</span>';
-    return '<span class="badge ok">No prazo</span>';
-  };
-  async function fetchProfiles() {
-    if (!workspaceId) return [];
-    const { data, error } = await supabase.from("profiles").select("user_id, workspace_id, role, active, name").eq("workspace_id", workspaceId).order("name", { ascending: true });
+  async function queryReservations(from, to) {
+    const { data, error } = await supabase.from("reservations").select("*").eq("company_id", profile.company_id).gte("start_at", from.toISOString()).lte("start_at", to.toISOString()).order("start_at");
     if (error) throw error;
     return data || [];
   }
-  async function fillTaskOwners() {
-    const sel = el("taskOwner");
-    const teamSel = el("teamUserFilter");
-    const profiles = await fetchProfiles();
-    if (sel) sel.innerHTML = "";
-    if (teamSel) teamSel.innerHTML = '<option value="all">Todos</option>';
-    const current = (await supabase.auth.getUser()).data?.user?.id;
-    profiles.filter((p) => p.active).forEach((p) => {
-      const label = p.name || p.user_id || "—";
-      if (sel) sel.insertAdjacentHTML("beforeend", `<option value="${p.user_id}">${escapeHtml(label)}</option>`);
-      if (teamSel) teamSel.insertAdjacentHTML("beforeend", `<option value="${p.user_id}">${escapeHtml(label)}</option>`);
-    });
-    if (sel && current && !sel.value) sel.value = current;
+
+  async function renderDashboard() {
+    message("nowLabel", `Agora: ${fmt(new Date())}`);
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const end = new Date(); end.setHours(23, 59, 59, 999);
+    const rows = await queryReservations(start, end);
+    message("todayMeta", `${rows.length} reserva(s)`);
+    el("todayList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas hoje.</p>';
+    const { data: members } = await supabase.from("cowork_members").select("amount_paid,status").eq("company_id", profile.company_id);
+    const activeMembers = (members || []).filter((m) => m.status === "active");
+    message("cwOcc", `${activeMembers.length} mensalista(s) ativo(s)`);
+    message("cwRevenue", `Receita mensal registada: ${money(activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0))}`);
   }
+
+  async function renderReservations() {
+    const day = el("resDay").value || ymd(new Date()); el("resDay").value = day;
+    const start = new Date(`${day}T00:00:00`); const end = new Date(`${day}T23:59:59`);
+    let rows = await queryReservations(start, end);
+    const rid = el("resFilterResource").value;
+    if (rid && rid !== "all") rows = rows.filter((r) => r.resource_id === rid);
+    message("reservasMsg", `${rows.length} reserva(s).`);
+    el("reservasList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${fmt(r.start_at)} → ${fmt(r.end_at)} • ${html(r.status)} • ${money(r.total_price)}</div></div><button class="btn sm" data-edit-res="${r.id}">Abrir</button></div>`).join("") || '<p class="muted">Sem reservas.</p>';
+    document.querySelectorAll("[data-edit-res]").forEach((b) => b.onclick = () => openReservation(b.dataset.editRes));
+  }
+
+  async function openReservation(id = "") {
+    el("reservationId").value = id;
+    message("reservationMsg", "—");
+    if (!id) {
+      el("reservationClient").value = ""; el("reservationStatus").value = "confirmed"; el("reservationPrice").value = 0;
+      const day = el("resDay").value || ymd(new Date()); el("reservationStart").value = `${day}T09:00`; el("reservationEnd").value = `${day}T10:00`;
+      if (resources[0]) el("reservationResource").value = resources.filter((r) => r.type !== "cowork")[0]?.id || "";
+    } else {
+      const { data, error } = await supabase.from("reservations").select("*").eq("id", id).single();
+      if (error) throw error;
+      el("reservationResource").value = data.resource_id; el("reservationClient").value = data.client_name; el("reservationStatus").value = data.status; el("reservationPrice").value = data.total_price;
+      const s = new Date(data.start_at); const e = new Date(data.end_at);
+      el("reservationStart").value = `${ymd(s)}T${pad2(s.getHours())}:${pad2(s.getMinutes())}`; el("reservationEnd").value = `${ymd(e)}T${pad2(e.getHours())}:${pad2(e.getMinutes())}`;
+    }
+    openModal("reservationModal");
+  }
+
+  async function saveReservation() {
+    const id = el("reservationId").value;
+    const payload = { company_id: profile.company_id, resource_id: el("reservationResource").value, client_name: el("reservationClient").value.trim(), start_at: new Date(el("reservationStart").value).toISOString(), end_at: new Date(el("reservationEnd").value).toISOString(), status: el("reservationStatus").value, total_price: Number(el("reservationPrice").value || 0) };
+    if (!payload.resource_id || !payload.client_name) throw new Error("Preencha recurso e cliente.");
+    const result = id ? await supabase.from("reservations").update(payload).eq("id", id) : await supabase.from("reservations").insert(payload);
+    if (result.error) throw result.error;
+    closeModal("reservationModal"); await renderReservations(); await renderDashboard();
+  }
+
+  async function deleteReservation() {
+    const id = el("reservationId").value; if (!id) return;
+    const { error } = await supabase.from("reservations").delete().eq("id", id);
+    if (error) throw error;
+    closeModal("reservationModal"); await renderReservations(); await renderDashboard();
+  }
+
+  async function renderCowork() {
+    const [{ data: members, error: e1 }, { data: passes, error: e2 }] = await Promise.all([
+      supabase.from("cowork_members").select("*").eq("company_id", profile.company_id).order("name"),
+      supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false })
+    ]);
+    if (e1) throw e1; if (e2) throw e2;
+    el("membersList").innerHTML = (members || []).map((m) => `<div class="item"><div><div class="item-title">${html(m.name)}</div><div class="item-meta">${html(m.plan)} • ${html(m.status)} • ${money(m.amount_paid)}</div></div><button class="btn sm" data-edit-member="${m.id}">Editar</button></div>`).join("") || '<p class="muted">Sem mensalistas.</p>';
+    document.querySelectorAll("[data-edit-member]").forEach((b) => b.onclick = () => openMember(b.dataset.editMember));
+    el("daypassList").innerHTML = (passes || []).map((p) => `<div class="item"><div><div class="item-title">${html(p.client_name)}</div><div class="item-meta">${p.date} • ${money(p.amount_paid)}</div></div></div>`).join("") || '<p class="muted">Sem diárias.</p>';
+  }
+
+  async function openMember(id = "") {
+    el("memberId").value = id; message("memberMsg", "—");
+    if (!id) { ["memberName", "memberPlan", "memberStart", "memberEnd", "memberAmount"].forEach((x) => el(x).value = ""); el("memberStatus").value = "active"; }
+    else { const { data, error } = await supabase.from("cowork_members").select("*").eq("id", id).single(); if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberAmount").value = data.amount_paid; el("memberStatus").value = data.status; }
+    openModal("memberModal");
+  }
+
+  async function saveMember() {
+    const id = el("memberId").value;
+    const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value.trim() || "monthly", start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, amount_paid: Number(el("memberAmount").value || 0), status: el("memberStatus").value };
+    if (!payload.name) throw new Error("Nome obrigatório.");
+    const result = id ? await supabase.from("cowork_members").update(payload).eq("id", id) : await supabase.from("cowork_members").insert(payload);
+    if (result.error) throw result.error;
+    closeModal("memberModal"); await renderCowork(); await renderDashboard();
+  }
+
+  async function addDaypass() {
+    const payload = { company_id: profile.company_id, client_name: el("daypassName").value.trim(), date: el("daypassDate").value || ymd(new Date()), amount_paid: Number(el("daypassAmount").value || 0) };
+    if (!payload.client_name) throw new Error("Nome do cliente obrigatório.");
+    const { error } = await supabase.from("cowork_daypasses").insert(payload);
+    if (error) throw error;
+    el("daypassName").value = ""; el("daypassAmount").value = ""; await renderCowork();
+  }
+
   async function fetchTasks(all = false) {
-    if (!workspaceId) return [];
-    const userId = (await supabase.auth.getUser()).data?.user?.id;
-    let q = supabase.from("tasks").select("*").eq("workspace_id", workspaceId).order("due_at", { ascending: true });
-    if (!all) q = q.eq("owner_id", userId);
+    let q = supabase.from("tasks").select("*").eq("company_id", profile.company_id).order("due_date");
+    if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
     const { data, error } = await q;
     if (error) throw error;
     return data || [];
   }
-  function taskCard(t, profiles = []) {
-    const owner = profiles.find((p) => p.user_id === t.owner_id)?.name || t.owner_id || "—";
-    return `<div class="item"><div><div class="item-title">${escapeHtml(t.title)}</div><div class="item-meta">${escapeHtml(owner)} • ${taskStatusLabel(t.status)} • ${escapeHtml(t.priority)} • Prazo: ${t.due_at ? fmt(t.due_at) : "—"} ${dueTag(t.due_at, t.status)}</div>${t.description ? `<div class="item-meta">${escapeHtml(t.description)}</div>` : ""}</div><button class="btn sm" data-task-edit="${t.id}">Abrir</button></div>`;
+
+  function taskItem(t) {
+    const person = profiles.find((p) => p.user_id === t.responsible_id)?.name || "—";
+    return `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(person)} • ${html(t.status)} • ${html(t.priority)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><button class="btn sm" data-edit-task="${t.id}">Abrir</button></div>`;
   }
+
   async function renderTasks() {
-    const host = el("tasksList"); if (!host) return;
-    try {
-      const [rows0, profiles] = await Promise.all([fetchTasks(false), fetchProfiles()]);
-      const st = el("taskStatusFilter")?.value || "all";
-      const q = (el("taskSearch")?.value || "").toLowerCase().trim();
-      let rows = rows0;
-      if (st !== "all") rows = rows.filter((t) => t.status === st);
-      if (q) rows = rows.filter((t) => String(t.title + " " + (t.description || "")).toLowerCase().includes(q));
-      host.innerHTML = rows.length ? rows.map((t) => taskCard(t, profiles)).join("") : '<p class="muted">Sem actividades.</p>';
-      if (el("tasksMsg")) el("tasksMsg").textContent = `${rows.length} actividade(s).`;
-      host.querySelectorAll("[data-task-edit]").forEach((b) => b.onclick = () => openTaskModal(b.dataset.taskEdit));
-    } catch (e) { if (el("tasksMsg")) el("tasksMsg").textContent = e.message || String(e); }
+    let rows = await fetchTasks(false);
+    const status = el("taskStatusFilter").value;
+    if (status !== "all") rows = rows.filter((t) => t.status === status);
+    message("tasksMsg", `${rows.length} actividade(s).`);
+    el("tasksList").innerHTML = rows.map(taskItem).join("") || '<p class="muted">Sem actividades.</p>';
+    document.querySelectorAll("[data-edit-task]").forEach((b) => b.onclick = () => openTask(b.dataset.editTask));
   }
+
   async function renderTeam() {
-    const host = el("teamList"); if (!host) return;
-    try {
-      await fillTaskOwners();
-      if (!(await isAdmin())) { el("teamMsg").textContent = "Área reservada a administradores."; host.innerHTML = ""; return; }
-      const [rows0, profiles] = await Promise.all([fetchTasks(true), fetchProfiles()]);
-      const owner = el("teamUserFilter")?.value || "all"; const st = el("teamTaskStatusFilter")?.value || "all";
-      let rows = rows0; if (owner !== "all") rows = rows.filter((t) => t.owner_id === owner); if (st !== "all") rows = rows.filter((t) => t.status === st);
-      host.innerHTML = rows.length ? rows.map((t) => taskCard(t, profiles)).join("") : '<p class="muted">Sem actividades da equipa.</p>';
-      el("teamMsg").textContent = `${rows.length} actividade(s) da equipa.`;
-      host.querySelectorAll("[data-task-edit]").forEach((b) => b.onclick = () => openTaskModal(b.dataset.taskEdit));
-    } catch (e) { if (el("teamMsg")) el("teamMsg").textContent = e.message || String(e); }
+    if (!isAdmin()) { message("teamMsg", "Área reservada a administradores."); el("teamList").innerHTML = ""; return; }
+    const rows = await fetchTasks(true);
+    message("teamMsg", `${rows.length} actividade(s) da empresa.`);
+    el("teamList").innerHTML = rows.map(taskItem).join("") || '<p class="muted">Sem actividades.</p>';
   }
-  async function openTaskModal(id = null) {
-    await fillTaskOwners();
-    el("taskModal").style.display = "grid"; el("taskMsg").textContent = "—"; el("taskId").value = id || "";
-    if (!id) { el("taskModalTitle").textContent = "Nova actividade"; el("taskTitle").value = ""; el("taskDescription").value = ""; el("taskStatus").value = "todo"; el("taskPriority").value = "medium"; el("taskDue").value = ""; el("taskNote").value = ""; el("btnDeleteTask").style.display = "none"; return; }
-    const { data, error } = await supabase.from("tasks").select("*").eq("id", id).single(); if (error) { el("taskMsg").textContent = error.message; return; }
-    el("taskModalTitle").textContent = "Editar actividade"; el("taskTitle").value = data.title || ""; el("taskDescription").value = data.description || ""; el("taskStatus").value = data.status || "todo"; el("taskPriority").value = data.priority || "medium"; el("taskOwner").value = data.owner_id || "";
-    if (data.due_at) { const d = new Date(data.due_at); el("taskDue").value = `${ymd(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; } else el("taskDue").value = "";
-    el("taskNote").value = ""; el("btnDeleteTask").style.display = "inline-flex";
+
+  async function openTask(id = "") {
+    el("taskId").value = id; message("taskMsg", "—"); fillPeopleSelect();
+    if (!id) { ["taskTitle", "taskDescription", "taskDue", "taskNote"].forEach((x) => el(x).value = ""); el("taskPriority").value = "medium"; el("taskStatus").value = "todo"; el("taskResponsible").value = currentUserId(); }
+    else { const { data, error } = await supabase.from("tasks").select("*").eq("id", id).single(); if (error) throw error; el("taskTitle").value = data.title; el("taskDescription").value = data.description || ""; el("taskPriority").value = data.priority; el("taskStatus").value = data.status; el("taskResponsible").value = data.responsible_id || ""; el("taskDue").value = data.due_date ? `${ymd(new Date(data.due_date))}T${pad2(new Date(data.due_date).getHours())}:${pad2(new Date(data.due_date).getMinutes())}` : ""; el("taskNote").value = ""; }
+    openModal("taskModal");
   }
+
   async function saveTask() {
-    try {
-      const id = el("taskId").value; const due = el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null;
-      const payload = { workspace_id: workspaceId, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), status: el("taskStatus").value, priority: el("taskPriority").value, due_at: due, owner_id: el("taskOwner").value, updated_at: new Date().toISOString() };
-      if (!payload.title) { el("taskMsg").textContent = "Título obrigatório."; return; }
-      if (payload.status === "done") payload.completed_at = new Date().toISOString();
-      let savedId = id;
-      if (id) { const { error } = await supabase.from("tasks").update(payload).eq("id", id).eq("workspace_id", workspaceId); if (error) throw error; }
-      else { payload.created_at = new Date().toISOString(); const { data, error } = await supabase.from("tasks").insert(payload).select("id").single(); if (error) throw error; savedId = data?.id; }
-      const note = el("taskNote").value.trim();
-      if (note && savedId) await supabase.from("task_updates").insert({ workspace_id: workspaceId, task_id: savedId, note });
-      el("taskModal").style.display = "none"; await renderTasks(); await renderTeam(); await renderDash();
-    } catch (e) { el("taskMsg").textContent = e.message || String(e); }
+    const id = el("taskId").value;
+    const payload = { company_id: profile.company_id, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), priority: el("taskPriority").value, due_date: el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null, status: el("taskStatus").value, responsible_id: el("taskResponsible").value || null, created_by: currentUserId() };
+    if (!payload.title) throw new Error("Título obrigatório.");
+    const result = id ? await supabase.from("tasks").update(payload).eq("id", id).select("id").single() : await supabase.from("tasks").insert(payload).select("id").single();
+    if (result.error) throw result.error;
+    const note = el("taskNote").value.trim();
+    if (note) { const { error } = await supabase.from("task_updates").insert({ task_id: result.data.id, user_id: currentUserId(), note }); if (error) throw error; }
+    closeModal("taskModal"); await renderTasks(); await renderTeam();
   }
-  async function requestDeleteTask() {
+
+  async function requestTaskRemoval() {
     const id = el("taskId").value; if (!id) return;
     const reason = prompt("Motivo do pedido de remoção:"); if (!reason) return;
-    const { error } = await supabase.from("task_delete_requests").insert({ workspace_id: workspaceId, task_id: id, reason });
-    el("taskMsg").textContent = error ? error.message : "Pedido enviado ✅";
+    const { error } = await supabase.from("task_delete_requests").insert({ task_id: id, requested_by: currentUserId(), reason, status: "pending" });
+    if (error) throw error;
+    message("taskMsg", "Pedido enviado.");
   }
+
   async function renderApprovals() {
-    try {
-      if (!(await isAdmin())) { el("approvalsMsg").textContent = "Área reservada a administradores."; return; }
-      const profiles = await fetchProfiles();
-      const pend = profiles.filter((p) => !p.active);
-      el("approvalsList").innerHTML = pend.length ? pend.map((p) => `<div class="item"><div><div class="item-title">${escapeHtml(p.name || p.user_id)}</div><div class="item-meta">${p.user_id}</div></div><button class="btn sm primary" data-approve-user="${p.user_id}">Aprovar</button></div>`).join("") : '<p class="muted">Sem utilizadores pendentes.</p>';
-      el("approvalsMsg").textContent = `${pend.length} pendente(s).`;
-      el("approvalsList").querySelectorAll("[data-approve-user]").forEach((b) => b.onclick = async () => { await supabase.from("profiles").update({ active: true }).eq("workspace_id", workspaceId).eq("user_id", b.dataset.approveUser); renderApprovals(); });
-      const { data: reqs, error } = await supabase.from("task_delete_requests").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }); if (error) throw error;
-      el("deleteReqList").innerHTML = (reqs || []).length ? reqs.map((r) => `<div class="item"><div><div class="item-title">Pedido: ${escapeHtml(r.task_id)}</div><div class="item-meta">${escapeHtml(r.reason)} • ${r.status || "pending"}</div></div><button class="btn sm danger" data-approve-del="${r.id}" data-task="${r.task_id}">Apagar tarefa</button></div>`).join("") : '<p class="muted">Sem pedidos de remoção.</p>';
-      el("deleteReqMsg").textContent = `${(reqs || []).length} pedido(s).`;
-      el("deleteReqList").querySelectorAll("[data-approve-del]").forEach((b) => b.onclick = async () => { await supabase.from("tasks").delete().eq("id", b.dataset.task).eq("workspace_id", workspaceId); await supabase.from("task_delete_requests").update({ status: "approved" }).eq("id", b.dataset.approveDel); renderApprovals(); });
-    } catch (e) { el("approvalsMsg").textContent = e.message || String(e); }
+    if (!isAdmin()) { message("approvalsMsg", "Área reservada a administradores."); return; }
+    const pending = profiles.filter((p) => p.status === "pending");
+    message("approvalsMsg", `${pending.length} utilizador(es) pendente(s).`);
+    el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
+    document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
+    const { data, error } = await supabase.from("task_delete_requests").select("*, tasks(company_id,title)").order("created_at", { ascending: false });
+    if (error) throw error;
+    const requests = (data || []).filter((r) => r.tasks?.company_id === profile.company_id && r.status === "pending");
+    el("deleteReqList").innerHTML = requests.map((r) => `<div class="item"><div><div class="item-title">${html(r.tasks?.title || r.task_id)}</div><div class="item-meta">${html(r.reason)}</div></div><button class="btn sm danger" data-del-task="${r.task_id}" data-request="${r.id}">Aprovar remoção</button></div>`).join("") || '<p class="muted">Sem pedidos.</p>';
+    document.querySelectorAll("[data-del-task]").forEach((b) => b.onclick = async () => { await supabase.from("tasks").delete().eq("id", b.dataset.delTask); await supabase.from("task_delete_requests").update({ status: "approved" }).eq("id", b.dataset.request); await renderApprovals(); });
   }
 
-  // ---------- Reports ----------
-  const renderReports = () => {
-    fillSelects();
+  async function renderReports() {
+    const from = el("repFrom").value || ymd(new Date()); const to = el("repTo").value || from; el("repFrom").value = from; el("repTo").value = to;
+    const rows = await queryReservations(new Date(`${from}T00:00:00`), new Date(`${to}T23:59:59`));
+    const total = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
+    message("reportsMsg", `${rows.length} reserva(s), total ${money(total)}.`);
+    el("reportsList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${fmt(r.start_at)} • ${money(r.total_price)}</div></div></div>`).join("");
+  }
 
-    const now = new Date();
-    if (el("repFrom") && !el("repFrom").value) el("repFrom").value = ymd(startOfMonth(now));
-    if (el("repTo") && !el("repTo").value) el("repTo").value = ymd(endOfMonth(now));
+  async function showScreen(name) {
+    if (!session) return showAuth();
+    document.querySelectorAll(".screen").forEach((s) => s.hidden = s.id !== `scr-${name}`);
+    document.querySelectorAll(".m-item").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
+    if (name === "dash") await renderDashboard();
+    if (name === "reservas") await renderReservations();
+    if (name === "cowork") await renderCowork();
+    if (name === "tasks") await renderTasks();
+    if (name === "team") await renderTeam();
+    if (name === "approvals") await renderApprovals();
+    if (name === "reports") await renderReports();
+  }
 
-    if (el("reportsList")) el("reportsList").innerHTML = "";
-    if (el("reportsMsg")) el("reportsMsg").textContent = "Defina o intervalo e clique em Gerar.";
-    if (el("repTotal2")) el("repTotal2").textContent = "—";
-    if (el("repMeta2")) el("repMeta2").textContent = "—";
-  };
+  function bind() {
+    el("btnLogin").onclick = async () => { try { message("authMsg", "A entrar..."); await login(); await loadBaseData(); hideAuth(); await showScreen("dash"); } catch (e) { showAuth(e.message || String(e)); } };
+    el("btnSignup").onclick = async () => { try { message("authMsg", "A criar conta..."); await signup(); } catch (e) { showAuth(e.message || String(e)); } };
+    el("btnLogout").onclick = logout;
+    document.querySelectorAll(".m-item").forEach((b) => b.onclick = () => showScreen(b.dataset.go));
+    el("btnOpenReservation").onclick = () => openReservation(); el("btnCloseReservation").onclick = () => closeModal("reservationModal"); el("btnSaveReservation").onclick = () => saveReservation().catch((e) => message("reservationMsg", e.message)); el("btnDeleteReservation").onclick = () => deleteReservation().catch((e) => message("reservationMsg", e.message));
+    el("resDay").onchange = renderReservations; el("resFilterResource").onchange = renderReservations;
+    el("btnAddMember").onclick = () => openMember(); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));
+    el("btnCreateTask").onclick = () => openTask(); el("btnCloseTask").onclick = () => closeModal("taskModal"); el("btnSaveTask").onclick = () => saveTask().catch((e) => message("taskMsg", e.message)); el("btnDeleteTask").onclick = () => requestTaskRemoval().catch((e) => message("taskMsg", e.message)); el("taskStatusFilter").onchange = renderTasks;
+    el("btnRunReports").onclick = renderReports;
+  }
 
-  const runReports = async () => {
-    const from = el("repFrom")?.value;
-    const to = el("repTo")?.value;
-    const rid = el("repResource")?.value || "all";
-    if (!from || !to) {
-      if (el("reportsMsg")) el("reportsMsg").textContent = "Preencha De e Até.";
-      return;
-    }
-
-    const fromD = new Date(from + "T00:00:00");
-    const toD = new Date(to + "T23:59:59");
-    try {
-      let rows = await fetchBookingsBetween(fromD, toD);
-      rows = rows.filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status));
-      if (rid !== "all") rows = rows.filter((x) => x.resource_id === rid);
-
-      const totalBookings = rows.reduce((acc, x) => acc + Number(x.total_price || 0), 0);
-      const totalCoworkDay = revenueCoworkDaypassesBetween(fromD, toD);
-      const totalAll = totalBookings + totalCoworkDay;
-
-      if (el("repTotal2")) el("repTotal2").textContent = MT(totalAll);
-      if (el("repMeta2")) el("repMeta2").textContent = `${from} → ${to} • Reservas: ${MT(totalBookings)} • Cowork diárias: ${MT(totalCoworkDay)}`;
-
-      const host = el("reportsList");
-      if (!host) return;
-      host.innerHTML = "";
-      if (!rows.length && !db.cowork_daypasses.length) {
-        if (el("reportsMsg")) el("reportsMsg").textContent = "Sem dados no intervalo.";
-        return;
-      }
-      if (el("reportsMsg")) el("reportsMsg").textContent = "";
-
-      rows.forEach((bk) => {
-        const r = getResource(bk.resource_id);
-        const item = document.createElement("div");
-        item.className = "item";
-        item.innerHTML = `<div><div class="item-title">${escapeHtml(r?.name || "—")} • ${escapeHtml(bk.client_name || "—")}</div><div class="item-meta">${fmt(bk.start_at)} → ${fmt(bk.end_at)} • ${MT(bk.total_price)}</div></div><button class="btn sm" data-edit="${bk.id}">Abrir</button>`;
-        host.appendChild(item);
-      });
-      host.querySelectorAll("[data-edit]").forEach((btn) => { btn.onclick = () => { showScreen("bookings"); openBookingModal(btn.getAttribute("data-edit")); }; });
-
-      db.cowork_daypasses.filter((x) => {
-        const t = new Date(x.date + "T12:00:00");
-        return t >= fromD && t <= toD;
-      }).sort((a, b) => (a.date > b.date ? 1 : -1)).forEach((x) => {
-        const item = document.createElement("div");
-        item.className = "item";
-        item.innerHTML = `<div><div class="item-title">Cowork (diária) • ${escapeHtml(x.name)}</div><div class="item-meta">${x.date} • ${x.seats} lugar(es) • ${MT(x.price)} ${x.note ? "• " + escapeHtml(x.note) : ""}</div></div><span class="badge ok">cowork-day</span>`;
-        host.appendChild(item);
-      });
-    } catch (e) {
-      if (el("reportsMsg")) el("reportsMsg").textContent = e.message || String(e);
-    }
-  };
-
-  const exportCSV = async () => {
-    const from = el("repFrom")?.value;
-    const to = el("repTo")?.value;
-    const rid = el("repResource")?.value || "all";
-    if (!from || !to) return;
-
-    const fromD = new Date(from + "T00:00:00");
-    const toD = new Date(to + "T23:59:59");
-    let rows = await fetchBookingsBetween(fromD, toD);
-    rows = rows.filter((x) => ["confirmed", "checked_in", "checked_out"].includes(x.status));
-    if (rid !== "all") rows = rows.filter((x) => x.resource_id === rid);
-    const dayRows = db.cowork_daypasses.filter((x) => { const t = new Date(x.date + "T12:00:00"); return t >= fromD && t <= toD; }).sort((a, b) => (a.date > b.date ? 1 : -1));
-    const csv = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const lines = [["type", "id", "resource", "client", "date", "start", "end", "status", "seats", "price", "note"].join(",")];
-    rows.forEach((bk) => { const r = getResource(bk.resource_id); lines.push(["booking", bk.id, csv(r?.name || ""), csv(bk.client_name || ""), "", bk.start_at, bk.end_at, bk.status, "", Number(bk.total_price || 0), ""].join(",")); });
-    dayRows.forEach((x) => lines.push(["cowork-day", x.id, csv("Cowork"), csv(x.name || ""), x.date, "", "", "confirmed", Number(x.seats || 0), Number(x.price || 0), csv(x.note || "")].join(",")));
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob); const a = document.createElement("a");
-    a.href = url; a.download = `relatorio_${from}_a_${to}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  };
-
-  // ---------- backup/reset ----------
-  const downloadBackup = () => {
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `space_control_backup_${ymd(new Date())}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  const factoryReset = () => {
-    const ok = confirm("Tem certeza? Isto apaga todos os dados deste navegador.");
-    if (!ok) return;
-    localStorage.removeItem(KEY);
-    db = emptyDB();
-    saveDB();
-    renderAll();
-    showScreen("dash");
-  };
-
-  // ---------- bind ----------
-  const bind = () => {
-    // menu
-    document.querySelectorAll(".m-item[data-go]").forEach((btn) => {
-      btn.onclick = () => showScreen(btn.getAttribute("data-go"));
-    });
-
-    // dash report buttons
-    document.querySelectorAll("[data-rep]").forEach((b) => {
-      b.onclick = () => renderQuickReport(b.getAttribute("data-rep"));
-    });
-
-    // AUTH (overlay)
-    if (el("btnLogin")) el("btnLogin").onclick = async () => {
-      try {
-        el("authMsg").textContent = "A entrar...";
-        await signIn(el("authEmail").value, el("authPass").value, el("authCode").value);
-
-        el("authMsg").textContent = "Login OK ✅ A carregar dados...";
-        await cloudPullSafe();
-
-        // mostra botão sair
-        if (el("btnLogout")) el("btnLogout").style.display = "inline-flex";
-
-        hideAuth();
-        renderAll();
-        showScreen("dash");
-        el("authMsg").textContent = "—";
-      } catch (e) {
-        el("authMsg").textContent = e?.message || String(e);
-      }
-    };
-
-    if (el("btnSignup")) el("btnSignup").onclick = async () => {
-      try {
-        el("authMsg").textContent = "A criar conta...";
-        const r = await signUp(el("authEmail").value, el("authPass").value, el("authCode").value);
-        if (r?.needsEmailConfirm) {
-          el("authMsg").textContent = "Conta criada ✅ Confirma no email e depois faz login.";
-          return;
-        }
-
-        el("authMsg").textContent = "Conta criada ✅ A carregar dados...";
-        await cloudPullSafe();
-
-        if (el("btnLogout")) el("btnLogout").style.display = "inline-flex";
-
-        hideAuth();
-        renderAll();
-        showScreen("dash");
-        el("authMsg").textContent = "—";
-      } catch (e) {
-        el("authMsg").textContent = e?.message || String(e);
-      }
-    };
-
-    if (el("btnLogout")) el("btnLogout").onclick = async () => {
-      await signOut();
-      if (el("btnLogout")) el("btnLogout").style.display = "none";
-      el("authMsg").textContent = "Sessão terminada.";
-      showAuth();
-    };
-
-    // bookings filters
-    if (el("bkDay")) el("bkDay").addEventListener("change", renderBookings);
-    if (el("bkFilterResource")) el("bkFilterResource").addEventListener("change", renderBookings);
-    if (el("bkFilterStatus")) el("bkFilterStatus").addEventListener("change", renderBookings);
-    if (el("bkSearch"))
-      el("bkSearch").addEventListener("input", () => {
-        clearTimeout(bind._t);
-        bind._t = setTimeout(renderBookings, 200);
-      });
-
-    // bookings modal
-    if (el("btnOpenBooking")) el("btnOpenBooking").onclick = () => openBookingModal(null);
-    if (el("btnCloseBooking")) el("btnCloseBooking").onclick = closeBookingModal;
-    if (el("btnSaveBooking")) el("btnSaveBooking").onclick = saveBooking;
-    if (el("btnDeleteBooking")) el("btnDeleteBooking").onclick = deleteBooking;
-
-    if (el("bkStart")) el("bkStart").addEventListener("change", autoPriceFor);
-    if (el("bkEnd")) el("bkEnd").addEventListener("change", autoPriceFor);
-    if (el("bkResource")) el("bkResource").addEventListener("change", autoPriceFor);
-
-    // cowork mensal
-    if (el("btnSaveCowork")) el("btnSaveCowork").onclick = saveCoworkCapacity;
-    if (el("btnSaveCoworkPrices")) el("btnSaveCoworkPrices").onclick = saveCoworkPrices;
-    if (el("btnAddMember")) el("btnAddMember").onclick = openMemberModal;
-    if (el("btnCloseMember")) el("btnCloseMember").onclick = closeMemberModal;
-    if (el("btnSaveMember")) el("btnSaveMember").onclick = saveMember;
-
-    // cowork diárias
-    if (el("cwDayDate"))
-      el("cwDayDate").addEventListener("change", () => {
-        const cw = getCowork();
-        if (el("cwDayPrice") && !el("cwDayPrice").value) el("cwDayPrice").value = Number(cw?.priceDay || 0);
-        renderCoworkDaypasses();
-      });
-    if (el("btnAddCoworkDay")) el("btnAddCoworkDay").onclick = addCoworkDaypass;
-
-    // tasks/team/approvals
-    if (el("btnCreateTask")) el("btnCreateTask").onclick = () => openTaskModal(null);
-    if (el("btnCloseTask")) el("btnCloseTask").onclick = () => { el("taskModal").style.display = "none"; };
-    if (el("btnSaveTask")) el("btnSaveTask").onclick = saveTask;
-    if (el("btnDeleteTask")) el("btnDeleteTask").onclick = requestDeleteTask;
-    if (el("taskStatusFilter")) el("taskStatusFilter").onchange = renderTasks;
-    if (el("taskSearch")) el("taskSearch").oninput = renderTasks;
-    if (el("btnReloadTeam")) el("btnReloadTeam").onclick = renderTeam;
-    if (el("teamUserFilter")) el("teamUserFilter").onchange = renderTeam;
-    if (el("teamTaskStatusFilter")) el("teamTaskStatusFilter").onchange = renderTeam;
-    if (el("btnReloadApprovals")) el("btnReloadApprovals").onclick = renderApprovals;
-
-    // reports
-    if (el("btnRunReports")) el("btnRunReports").onclick = runReports;
-    if (el("btnExportCSV")) el("btnExportCSV").onclick = exportCSV;
-
-    // backup/reset
-    if (el("btnBackup")) el("btnBackup").onclick = downloadBackup;
-    if (el("btnFactoryReset")) el("btnFactoryReset").onclick = factoryReset;
-
-    // close modals on background click
-    if (el("bookingModal"))
-      el("bookingModal").addEventListener("click", (e) => {
-        if (e.target.id === "bookingModal") closeBookingModal();
-      });
-    if (el("memberModal"))
-      el("memberModal").addEventListener("click", (e) => {
-        if (e.target.id === "memberModal") closeMemberModal();
-      });
-    if (el("taskModal")) el("taskModal").addEventListener("click", (e) => { if (e.target.id === "taskModal") el("taskModal").style.display = "none"; });
-  };
-
-  // ---------- INIT (corrigido para overlay) ----------
   async function init() {
-    // 1) carrega db SEMPRE primeiro
-    db = loadDB();
-
-    // labels base
-    if (db?.meta?.updatedAt && el("dbUpdated")) el("dbUpdated").textContent = `Atualizado: ${fmt(db.meta.updatedAt)}`;
-    if (el("bkDay")) el("bkDay").value = ymd(new Date());
-
-    // relógio
-    const tickNow = () => {
-      if (el("nowLabel")) el("nowLabel").textContent = `Agora: ${fmt(new Date().toISOString())}`;
-    };
-    tickNow();
-    setInterval(tickNow, 30 * 1000);
-
-    // bind UI
     bind();
-
-    // 2) sessão
-    await refreshSession();
-
-    // 3) se não logado → overlay e fim
-    if (!session) {
-      showAuth();
-      return;
-    }
-
-    // 4) se logado → descobre workspace e puxa cloud (se der)
-    workspaceId = await getMyWorkspaceId();
-    hideAuth();
-    if (el("btnLogout")) el("btnLogout").style.display = "inline-flex";
-
-  if (workspaceId) {
-  await cloudPullSafe();
-
-  try {
-    const resources = await fetchResources(workspaceId);
-
-    db.resources = resources.map((r) => ({
-      id: r.id,
-      code: r.code,
-      type: r.resource_type,
-      name: r.name,
-      priceHour: Number(r.price_hour || 0),
-      priceDay: Number(r.price_day || 0),
-      priceMonth: Number(r.price_month || 0),
-      capacity: Number(r.capacity || 0),
-      bufferMin: Number(r.buffer_min || 0)
-    }));
-    await loadCoworkMembers();
-  } catch (err) {
-    console.error("Erro ao carregar resources:", err);
-  }
-}
-
-    // 5) renderiza e abre dash
-    renderAll();
-    showScreen("dash");
-
-    // auto refresh dash
-    setInterval(() => {
-      const dash = el("scr-dash");
-      if (dash && !dash.hidden) renderDash();
-    }, 20 * 1000);
-
-    if (workspaceId) {
-  await cloudPullSafe();
-
-  try {
-    const resources = await fetchResources(workspaceId);
-
-    db.resources = resources.map((r) => ({
-      id: r.id, // UUID REAL
-      code: r.code,
-      type: r.resource_type,
-      name: r.name,
-      priceHour: Number(r.price_hour || 0),
-      priceDay: Number(r.price_day || 0),
-      priceMonth: Number(r.price_month || 0),
-      capacity: Number(r.capacity || 0),
-      bufferMin: Number(r.buffer_min || 0)
-    }));
-
-  } catch (err) {
-    console.error("Erro ao carregar resources:", err);
-  }
-}
-    
-  }
-  
-
-  
-async function getMyProfile() {
-  const { data: userData, error: userError } = await supabase.auth.getUser();
-  if (userError) throw userError;
-
-  const user = userData?.user;
-  if (!user) return null;
-
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('user_id, workspace_id, role, active')
-    .eq('user_id', user.id)
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-async function fetchResources(workspaceId) {
-  const { data, error } = await supabase
-    .from('resources')
-    .select('*')
-    .eq('workspace_id', workspaceId)
-    .eq('active', true)
-    .order('sort_order', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-async function fetchBookingsByDay(workspaceId, day) {
-  const start = new Date(day + 'T00:00:00');
-  const end = new Date(day + 'T23:59:59');
-
-  const { data, error } = await supabase
-    .from('reservations')
-    .select('*')
-    .eq('workspace_id', workspaceId)
-    .gte('start_at', start.toISOString())
-    .lte('start_at', end.toISOString())
-    .order('start_at', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-async function fetchCoworkMembers(workspaceId) {
-  const { data, error } = await supabase
-    .from('cowork_members')
-    .select('*')
-    .eq('workspace_id', workspaceId)
-    .order('name', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-
-async function loadCoworkMembers() {
-  if (!workspaceId) return [];
-  const rows = await fetchCoworkMembers(workspaceId);
-  db.cowork_members = rows.map((m) => ({
-    id: m.id,
-    name: m.name,
-    seats: Number(m.seats || 0),
-    price: Number(m.price || 0),
-    active: m.active !== false
-  }));
-  saveDB();
-  return db.cowork_members;
-}
-
-async function fetchCoworkDaypasses(workspaceId, date) {
-  const { data, error } = await supabase
-    .from('cowork_daypasses')
-    .select('*')
-    .eq('workspace_id', workspaceId)
-    .eq('pass_date', date)
-    .order('created_at', { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-  async function fetchBookingsForDay(dayYMD) {
-  const day = new Date(dayYMD + "T00:00:00");
-  const start = new Date(day);
-  start.setHours(0, 0, 0, 0);
-
-  const end = new Date(day);
-  end.setHours(23, 59, 59, 999);
-
-  const { data, error } = await supabase
-    .from("reservations")
-    .select(`
-      id,
-      workspace_id,
-      resource_id,
-      client_name,
-      start_at,
-      end_at,
-      status,
-      total_price
-    `)
-    .eq("workspace_id", workspaceId)
-    .gte("start_at", start.toISOString())
-    .lte("start_at", end.toISOString())
-    .order("start_at", { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-  async function fetchBookingById(id) {
-  const { data, error } = await supabase
-    .from("reservations")
-    .select("*")
-    .eq("id", id)
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-  async function fetchBookingsBetween(from, to) {
-  const { data, error } = await supabase
-    .from("reservations")
-    .select(`
-      id,
-      workspace_id,
-      resource_id,
-      client_name,
-      start_at,
-      end_at,
-      status,
-      total_price
-    `)
-    .eq("workspace_id", workspaceId)
-    .gte("start_at", new Date(from).toISOString())
-    .lte("start_at", new Date(to).toISOString())
-    .order("start_at", { ascending: true });
-
-  if (error) throw error;
-  return data || [];
-}
-
-async function nowBookingFor(resourceId, now = new Date()) {
-  if (!resourceId) return null;
-
-  const { data, error } = await supabase
-    .from("reservations")
-    .select(`
-      id,
-      resource_id,
-      client_name,
-      start_at,
-      end_at,
-      status,
-      total_price
-    `)
-    .eq("workspace_id", workspaceId)
-    .eq("resource_id", resourceId)
-    .in("status", ["confirmed", "checked_in"])
-    .lte("start_at", now.toISOString())
-    .gt("end_at", now.toISOString())
-    .order("start_at", { ascending: true })
-    .limit(1);
-
-  if (error) throw error;
-  return data?.[0] || null;
-}
-
-async function nextBookingFor(resourceId, now = new Date()) {
-  if (!resourceId) return null;
-
-  const { data, error } = await supabase
-    .from("reservations")
-    .select(`
-      id,
-      resource_id,
-      client_name,
-      start_at,
-      end_at,
-      status,
-      total_price
-    `)
-    .eq("workspace_id", workspaceId)
-    .eq("resource_id", resourceId)
-    .in("status", ["confirmed", "pending"])
-    .gt("start_at", now.toISOString())
-    .order("start_at", { ascending: true })
-    .limit(1);
-
-  if (error) throw error;
-  return data?.[0] || null;
-}
-
-async function revenueBookingsBetween(from, to, resourceId = null) {
-  let query = supabase
-    .from("reservations")
-    .select("total_price")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["confirmed", "checked_in", "checked_out"])
-    .gte("start_at", new Date(from).toISOString())
-    .lte("start_at", new Date(to).toISOString());
-
-  if (resourceId) {
-    query = query.eq("resource_id", resourceId);
+    if (el("resDay")) el("resDay").value = ymd(new Date());
+    if (el("daypassDate")) el("daypassDate").value = ymd(new Date());
+    try {
+      await loadSession();
+      if (!session) return showAuth();
+      await loadProfile();
+      if (!profile?.company_id) return showAuth("Perfil não encontrado para este utilizador.");
+      if (profile.status !== "approved") return showAuth("Conta pendente de aprovação.");
+      await loadBaseData();
+      hideAuth();
+      await showScreen("dash");
+      setInterval(() => { if (!el("scr-dash")?.hidden) renderDashboard(); }, 30000);
+    } catch (e) { showAuth(e.message || String(e)); }
   }
 
-  const { data, error } = await query;
-  if (error) throw error;
-
-  return (data || []).reduce((acc, x) => acc + Number(x.total_price || 0), 0);
-}
-
-
-
-  
-
-
-  document.addEventListener("DOMContentLoaded", () => init());
+  document.addEventListener("DOMContentLoaded", init);
 })();

@@ -7,8 +7,8 @@
   // ===============================
   // SUPABASE (Cloud + Login)
   // ===============================
-  const SUPABASE_URL = "https://awrgsfvgajekzrzaagbq.supabase.co";
-  const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF3cmdzZnZnYWpla3pyemFhZ2JxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2NTE5MzIsImV4cCI6MjA5MTIyNzkzMn0.o5b_nSi2AhvVxejYD_QkBTq6lH0lAutCUZsbuVyjVA4";
+  const SUPABASE_URL = "https://etjkuqdaadiehdpttkon.supabase.co";
+  const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV0amt1cWRhYWRpZWhkcHR0a29uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNDY0ODIsImV4cCI6MjA5NzcyMjQ4Mn0.uS2olKKCvrgLgwjr2yjj27Mm0ZXoSIp5LI9w5yPLlac";
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
   let session = null;
@@ -158,7 +158,7 @@ async function joinWorkspaceByCode(code) {
     ],
     cowork_members: [],
     cowork_daypasses: [],
-    bookings: []
+    reservations: []
   });
 
   const loadDB = () => {
@@ -171,7 +171,8 @@ async function joinWorkspaceByCode(code) {
       x.resources ||= emptyDB().resources;
       x.cowork_members ||= [];
       x.cowork_daypasses ||= [];
-      x.bookings ||= [];
+      x.reservations ||= x.bookings || [];
+      delete x.bookings;
       return x;
     } catch {
       return emptyDB();
@@ -194,67 +195,13 @@ function getResourceByCode(code) {
   
   const getResource = (id) => db?.resources?.find((r) => r.id === id);
   const getCowork = () => db?.resources?.find((r) => r.type === "cowork");
-  // ------- SNAPSHOT CLOUD (db inteiro por empresa) -------
-  async function cloudPull() {
-    if (!workspaceId) return false;
-
-    const { data, error } = await supabase
-      .from("db_snapshots")
-      .select("db")
-      .eq("workspace_id", workspaceId)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    if (data?.db) {
-      db = data.db;
-
-      // compat
-      db.meta ||= { version: "1.1", updatedAt: new Date().toISOString() };
-      db.resources ||= emptyDB().resources;
-      db.cowork_members ||= [];
-      db.cowork_daypasses ||= [];
-      db.bookings ||= [];
-
-      saveDB(); // cache offline
-      return true;
-    }
-    return false;
-  }
-
-  async function cloudPush() {
-    if (!workspaceId) return;
-
-    const { data: u } = await supabase.auth.getUser();
-    const user = u?.user;
-
-    const payload = {
-      workspace_id: workspaceId,
-      db: db,
-      updated_at: new Date().toISOString(),
-      updated_by: user?.id || null
-    };
-
-    const { error } = await supabase.from("db_snapshots").upsert(payload);
-    if (error) console.warn("Cloud push falhou:", error.message);
-  }
-
-  async function cloudPullSafe() {
-    try {
-      if (!db) db = loadDB();
-      await cloudPull();
-    } catch (e) {
-      console.warn("cloudPull falhou (offline/erro). Vou usar local.", e);
-    }
-  }
-
-  async function cloudPushSafe() {
-    try {
-      await cloudPush();
-    } catch (e) {
-      console.warn("cloudPush falhou (offline/erro).", e);
-    }
-  }
+  // ------- LEGACY SNAPSHOT CLOUD (isolado) -------
+  // A base nova é normalizada (resources, reservations, cowork_members, tasks, etc.).
+  // Mantemos estes stubs para não misturar db_snapshots/workspace com a fonte de verdade.
+  async function cloudPull() { return false; }
+  async function cloudPush() { return; }
+  async function cloudPullSafe() { return false; }
+  async function cloudPushSafe() { return; }
 
   // ---------- datas/horas ----------
   const startOfDay = (d) => {
@@ -494,12 +441,12 @@ function getResourceByCode(code) {
     const buf = Number(r.bufferMin || 0);
     const A = withBuffer(startISO, endISO, buf);
 
-    return db.bookings
-      .filter((b) => b.resourceId === resourceId)
+    return (db.reservations || [])
+      .filter((b) => (b.resource_id || b.resourceId) === resourceId)
       .filter((b) => b.id !== ignoreId)
       .filter((b) => ["confirmed", "pending", "checked_in"].includes(b.status))
       .some((b) => {
-        const B = withBuffer(b.start, b.end, buf);
+        const B = withBuffer(b.start_at || b.start, b.end_at || b.end, buf);
         return overlaps(A.s, A.e, B.s, B.e);
       });
   };
@@ -833,10 +780,10 @@ const saveBooking = async () => {
     let error = null;
 
     if (!id) {
-      ({ error } = await supabase.from("bookings").insert(payload));
+      ({ error } = await supabase.from("reservations").insert(payload));
     } else {
       ({ error } = await supabase
-        .from("bookings")
+        .from("reservations")
         .update(payload)
         .eq("id", id));
     }
@@ -858,7 +805,7 @@ const deleteBooking = async () => {
     if (!id) return;
 
     const { error } = await supabase
-      .from("bookings")
+      .from("reservations")
       .delete()
       .eq("id", id);
 
@@ -906,19 +853,33 @@ const deleteBooking = async () => {
               </div>
               <div class="row" style="gap:8px">
                 ${badge}
+                <button class="btn sm" data-edit-member="${m.id}">Editar</button>
                 <button class="btn sm danger" data-del="${m.id}">Remover</button>
               </div>
             `;
             list.appendChild(item);
           });
 
+        list.querySelectorAll("[data-edit-member]").forEach((btn) => {
+          btn.onclick = () => openMemberModal(btn.getAttribute("data-edit-member"));
+        });
+
         list.querySelectorAll("[data-del]").forEach((btn) => {
-          btn.onclick = () => {
+          btn.onclick = async () => {
             const id = btn.getAttribute("data-del");
-            db.cowork_members = db.cowork_members.filter((x) => x.id !== id);
-            saveDB();
-            renderCowork();
-            renderDash();
+            try {
+              const { error } = await supabase
+                .from("cowork_members")
+                .delete()
+                .eq("workspace_id", workspaceId)
+                .eq("id", id);
+              if (error) throw error;
+              await loadCoworkMembers();
+              renderCowork();
+              await renderDash();
+            } catch (err) {
+              if (el("membersMsg")) el("membersMsg").textContent = err.message || "Erro ao remover mensalista.";
+            }
           };
         });
       }
@@ -946,21 +907,25 @@ const deleteBooking = async () => {
     if (el("cwDayPrice") && !el("cwDayPrice").value) el("cwDayPrice").value = Number(cw.priceDay || 0);
     renderDash();
   };
-  const openMemberModal = () => {
+  const openMemberModal = (id = null) => {
     const cw = getCowork();
-    if (el("mName")) el("mName").value = "";
-    if (el("mSeats")) el("mSeats").value = 1;
-    if (el("mPrice")) el("mPrice").value = Number(cw?.priceMonth || 6000);
-    if (el("mActive")) el("mActive").value = "true";
+    const member = id ? db.cowork_members.find((m) => m.id === id) : null;
+    if (el("mName")) el("mName").value = member?.name || "";
+    if (el("mSeats")) el("mSeats").value = Number(member?.seats || 1);
+    if (el("mPrice")) el("mPrice").value = Number(member?.price || cw?.priceMonth || 6000);
+    if (el("mActive")) el("mActive").value = String(member?.active ?? true);
     if (el("mMsg")) el("mMsg").textContent = "—";
-    if (el("memberModal")) el("memberModal").style.display = "grid";
+    if (el("memberModal")) {
+      el("memberModal").dataset.memberId = id || "";
+      el("memberModal").style.display = "grid";
+    }
   };
 
   const closeMemberModal = () => {
     if (el("memberModal")) el("memberModal").style.display = "none";
   };
 
-  const saveMember = () => {
+  const saveMember = async () => {
     const name = (el("mName")?.value || "").trim();
     const seats = Math.max(1, Number(el("mSeats")?.value || 1));
     const price = Math.max(0, Number(el("mPrice")?.value || 0));
@@ -971,19 +936,37 @@ const deleteBooking = async () => {
       return;
     }
 
+
+    const id = el("memberModal")?.dataset.memberId || "";
+    const existingSeats = id ? Number(db.cowork_members.find((m) => m.id === id)?.seats || 0) : 0;
     if (active) {
       const av = coworkAvailability();
-      if (av.used + seats > av.cap) {
+      if (av.used - existingSeats + seats > av.cap) {
         if (el("mMsg")) el("mMsg").textContent = `Sem lugares suficientes. Livres agora: ${av.free}`;
         return;
       }
     }
 
-    db.cowork_members.push({ id: uid(), name, seats, price, active });
-    saveDB();
-    closeMemberModal();
-    renderCowork();
-    renderDash();
+    const payload = { workspace_id: workspaceId, name, seats, price, active };
+    try {
+      let error;
+      if (id) {
+        ({ error } = await supabase
+          .from("cowork_members")
+          .update(payload)
+          .eq("workspace_id", workspaceId)
+          .eq("id", id));
+      } else {
+        ({ error } = await supabase.from("cowork_members").insert(payload));
+      }
+      if (error) throw error;
+      await loadCoworkMembers();
+      closeMemberModal();
+      renderCowork();
+      await renderDash();
+    } catch (err) {
+      if (el("mMsg")) el("mMsg").textContent = err.message || "Erro ao guardar mensalista.";
+    }
   };
 
 
@@ -1397,6 +1380,7 @@ const deleteBooking = async () => {
       capacity: Number(r.capacity || 0),
       bufferMin: Number(r.buffer_min || 0)
     }));
+    await loadCoworkMembers();
   } catch (err) {
     console.error("Erro ao carregar resources:", err);
   }
@@ -1473,7 +1457,7 @@ async function fetchBookingsByDay(workspaceId, day) {
   const end = new Date(day + 'T23:59:59');
 
   const { data, error } = await supabase
-    .from('bookings')
+    .from('reservations')
     .select('*')
     .eq('workspace_id', workspaceId)
     .gte('start_at', start.toISOString())
@@ -1493,6 +1477,21 @@ async function fetchCoworkMembers(workspaceId) {
 
   if (error) throw error;
   return data || [];
+}
+
+
+async function loadCoworkMembers() {
+  if (!workspaceId) return [];
+  const rows = await fetchCoworkMembers(workspaceId);
+  db.cowork_members = rows.map((m) => ({
+    id: m.id,
+    name: m.name,
+    seats: Number(m.seats || 0),
+    price: Number(m.price || 0),
+    active: m.active !== false
+  }));
+  saveDB();
+  return db.cowork_members;
 }
 
 async function fetchCoworkDaypasses(workspaceId, date) {
@@ -1516,7 +1515,7 @@ async function fetchCoworkDaypasses(workspaceId, date) {
   end.setHours(23, 59, 59, 999);
 
   const { data, error } = await supabase
-    .from("bookings")
+    .from("reservations")
     .select(`
       id,
       workspace_id,
@@ -1538,7 +1537,7 @@ async function fetchCoworkDaypasses(workspaceId, date) {
 
   async function fetchBookingById(id) {
   const { data, error } = await supabase
-    .from("bookings")
+    .from("reservations")
     .select("*")
     .eq("id", id)
     .single();
@@ -1549,7 +1548,7 @@ async function fetchCoworkDaypasses(workspaceId, date) {
 
   async function fetchBookingsBetween(from, to) {
   const { data, error } = await supabase
-    .from("bookings")
+    .from("reservations")
     .select(`
       id,
       workspace_id,
@@ -1573,7 +1572,7 @@ async function nowBookingFor(resourceId, now = new Date()) {
   if (!resourceId) return null;
 
   const { data, error } = await supabase
-    .from("bookings")
+    .from("reservations")
     .select(`
       id,
       resource_id,
@@ -1599,7 +1598,7 @@ async function nextBookingFor(resourceId, now = new Date()) {
   if (!resourceId) return null;
 
   const { data, error } = await supabase
-    .from("bookings")
+    .from("reservations")
     .select(`
       id,
       resource_id,
@@ -1622,7 +1621,7 @@ async function nextBookingFor(resourceId, now = new Date()) {
 
 async function revenueBookingsBetween(from, to, resourceId = null) {
   let query = supabase
-    .from("bookings")
+    .from("reservations")
     .select("total_price")
     .eq("workspace_id", workspaceId)
     .in("status", ["confirmed", "checked_in", "checked_out"])

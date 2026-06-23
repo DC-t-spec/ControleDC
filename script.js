@@ -547,11 +547,26 @@
     if (name === "reports") await renderReports();
   }
 
+  function closeMobileMenu() {
+    const sidebar = document.querySelector(".sidebar");
+    const button = el("btnMobileMenu");
+    sidebar?.classList.remove("menu-open");
+    button?.setAttribute("aria-expanded", "false");
+  }
+
+  function toggleMobileMenu() {
+    const sidebar = document.querySelector(".sidebar");
+    const button = el("btnMobileMenu");
+    const isOpen = sidebar?.classList.toggle("menu-open") || false;
+    button?.setAttribute("aria-expanded", String(isOpen));
+  }
+
   function bind() {
     el("btnLogin").onclick = async () => { try { message("authMsg", "A entrar..."); await login(); await loadBaseData(); hideAuth(); await showScreen("dash"); } catch (e) { showAuth(e.message || String(e)); } };
     el("btnSignup").onclick = async () => { try { message("authMsg", "A criar conta..."); await signup(); } catch (e) { showAuth(e.message || String(e)); } };
     el("btnLogout").onclick = logout;
-    document.querySelectorAll(".m-item").forEach((b) => b.onclick = () => showScreen(b.dataset.go));
+    el("btnMobileMenu").onclick = toggleMobileMenu;
+    document.querySelectorAll(".m-item").forEach((b) => b.onclick = async () => { closeMobileMenu(); await showScreen(b.dataset.go); });
     el("btnOpenReservation").onclick = () => openReservation(); el("btnCloseReservation").onclick = () => closeModal("reservationModal"); el("btnSaveReservation").onclick = () => saveReservation().catch((e) => message("reservationMsg", e.message)); el("btnDeleteReservation").onclick = () => deleteReservation().catch((e) => message("reservationMsg", e.message));
     el("resDay").onchange = renderReservations; el("resFilterResource").onchange = renderReservations;
     el("btnAddMember").onclick = () => openMember(); el("btnAddPayment").onclick = () => addCoworkPayment().catch((e) => message("memberMsg", e.message)); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));

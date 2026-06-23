@@ -224,24 +224,35 @@ create trigger tasks_prevent_approval_escalation before update on public.tasks f
 
 create function public.handle_new_auth_user() returns trigger language plpgsql security definer set search_path = public as $$
 declare
-  metadata_company_id uuid;
+  default_company_id uuid;
+  should_bootstrap_admin boolean;
 begin
-  select c.id into metadata_company_id
+  select c.id into default_company_id
   from public.companies c
-  where c.code = nullif(new.raw_user_meta_data->>'company_code', '')
+  where c.code = 'XHUB-26'
   limit 1;
 
-  if metadata_company_id is null then
-    metadata_company_id := nullif(new.raw_user_meta_data->>'company_id', '')::uuid;
+  if default_company_id is null then
+    raise exception 'Empresa padrão XHUB não encontrada.';
   end if;
+
+  perform pg_advisory_xact_lock(hashtext('public.handle_new_auth_user:XHUB:first_admin')::bigint);
+
+  select not exists (
+    select 1
+    from public.profiles p
+    where p.company_id = default_company_id
+      and p.role = 'admin'
+      and p.status = 'approved'
+  ) into should_bootstrap_admin;
 
   insert into public.profiles (user_id, company_id, name, role, status)
   values (
     new.id,
-    metadata_company_id,
+    default_company_id,
     coalesce(nullif(new.raw_user_meta_data->>'name', ''), split_part(new.email, '@', 1), 'utilizador'),
-    'user',
-    'pending'
+    case when should_bootstrap_admin then 'admin' else 'user' end,
+    case when should_bootstrap_admin then 'approved' else 'pending' end
   )
   on conflict (user_id) do update set
     company_id = coalesce(public.profiles.company_id, excluded.company_id),
@@ -297,15 +308,3 @@ create policy "task updates company insert" on public.task_updates for insert wi
 create policy "delete requests company read" on public.task_delete_requests for select using (exists (select 1 from public.tasks t where t.id = task_id and t.company_id = public.my_company_id()));
 create policy "delete requests company insert" on public.task_delete_requests for insert with check (requested_by = auth.uid() and exists (select 1 from public.tasks t where t.id = task_id and t.company_id = public.my_company_id()));
 create policy "delete requests admin update" on public.task_delete_requests for update using (exists (select 1 from public.tasks t where t.id = task_id and public.is_company_admin(t.company_id))) with check (exists (select 1 from public.tasks t where t.id = task_id and public.is_company_admin(t.company_id)));
-
--- First administrator bootstrap (run once only):
--- 1) Create the first admin through the app's "Criar conta" button using company code XHUB-26.
--- 2) Run the UPDATE below once in the Supabase SQL editor to promote that profile.
--- 3) After this, all new users are created as role='user' and status='pending' automatically;
---    the approved admin manages approvals in the app, so no more manual SQL is needed.
-update public.profiles p
-set role = 'admin', status = 'approved', company_id = c.id, updated_at = now()
-from auth.users u, public.companies c
-where p.user_id = u.id
-  and u.email = 'halimauaide803@gmail.com'
-  and c.code = 'XHUB-26';

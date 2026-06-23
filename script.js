@@ -44,6 +44,41 @@
     return data;
   }
 
+  function isExistingSignup(data, error) {
+    const messageText = `${error?.message || ""} ${error?.code || ""} ${error?.name || ""}`.toLowerCase();
+    if (error && (messageText.includes("already") || messageText.includes("registered") || messageText.includes("exists") || messageText.includes("conflict-user-id"))) return true;
+    return Boolean(data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0);
+  }
+
+  async function saveSignupProfile(userId, foundCompany, email) {
+    if (!userId) throw new Error("Não foi possível obter o ID do utilizador criado pelo Supabase Auth.");
+    const name = email.split("@")[0] || "utilizador";
+    const payload = {
+      user_id: userId,
+      company_id: foundCompany.id,
+      name,
+      role: "user",
+      status: "pending"
+    };
+
+    const { data: existingProfile, error: readError } = await supabase.from("profiles").select("user_id").eq("user_id", userId).maybeSingle();
+    if (readError) throw readError;
+
+    if (existingProfile) {
+      const { error: updateError } = await supabase.from("profiles").update({
+        company_id: foundCompany.id,
+        name,
+        role: "user",
+        status: "pending"
+      }).eq("user_id", userId);
+      if (updateError) throw updateError;
+      return;
+    }
+
+    const { error: insertError } = await supabase.from("profiles").insert(payload);
+    if (insertError) throw insertError;
+  }
+
   async function signup() {
     const email = el("authEmail").value.trim().toLowerCase();
     const password = el("authPass").value;
@@ -54,22 +89,32 @@
     if (companyError) throw companyError;
     if (!foundCompany) throw new Error("Código da empresa inválido.");
 
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
-    const user = data.user;
-    if (!user) throw new Error("Conta criada. Confirme o email e depois faça login.");
-
     const name = email.split("@")[0] || "utilizador";
-    const { error: profileError } = await supabase.from("profiles").upsert({
-      user_id: user.id,
-      company_id: foundCompany.id,
-      name,
-      role: "user",
-      status: "pending"
-    }, { onConflict: "user_id" });
-    if (profileError) throw profileError;
-    await supabase.auth.signOut();
-    session = null;
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          company_id: foundCompany.id,
+          company_code: foundCompany.code,
+          name
+        }
+      }
+    });
+
+    if (isExistingSignup(data, error)) throw new Error("Já existe uma conta com este email. Faça login ou use outro email.");
+    if (error) throw error;
+
+    const user = data?.user;
+    if (!user?.id) throw new Error("Não foi possível confirmar a criação do utilizador no Supabase Auth.");
+
+    if (data.session) {
+      session = data.session;
+      await saveSignupProfile(user.id, foundCompany, email);
+      await supabase.auth.signOut();
+      session = null;
+    }
+
     throw new Error("Conta criada. Aguarde aprovação do administrador.");
   }
 
@@ -78,11 +123,13 @@
     const password = el("authPass").value;
     const code = el("authCode").value.trim().toUpperCase();
     if (!email || !password || !code) throw new Error("Preencha email, senha e código da empresa.");
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    await loadSession();
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error("Email ou senha inválidos.");
+    session = data.session;
+
     const loaded = await loadProfile();
-    if (!loaded?.company_id) throw new Error("Perfil não encontrado para este utilizador.");
+    if (!loaded?.company_id) throw new Error("Perfil não encontrado para este utilizador. Contacte o administrador.");
     if (loaded.status !== "approved") throw new Error("Conta pendente de aprovação.");
     if (company?.code !== code) throw new Error("Código da empresa não corresponde ao seu perfil.");
   }
@@ -279,8 +326,9 @@
     if (!isAdmin()) { message("approvalsMsg", "Área reservada a administradores."); return; }
     const pending = profiles.filter((p) => p.status === "pending");
     message("approvalsMsg", `${pending.length} utilizador(es) pendente(s).`);
-    el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
+    el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><div class="row"><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button><button class="btn sm danger" data-reject="${p.user_id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
     document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
+    document.querySelectorAll("[data-reject]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "rejected" }).eq("user_id", b.dataset.reject).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
     const { data, error } = await supabase.from("task_delete_requests").select("*, tasks(company_id,title)").order("created_at", { ascending: false });
     if (error) throw error;
     const requests = (data || []).filter((r) => r.tasks?.company_id === profile.company_id && r.status === "pending");

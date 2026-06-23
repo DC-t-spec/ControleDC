@@ -135,6 +135,33 @@ end;
 $$;
 
 create trigger profiles_set_updated_at before update on public.profiles for each row execute function public.set_updated_at();
+
+create function public.prevent_profile_privilege_escalation() returns trigger language plpgsql set search_path = public as $$
+begin
+  -- Manual SQL/admin service operations have no auth.uid() and are allowed for initial setup.
+  if auth.uid() is null then
+    return new;
+  end if;
+
+  -- Approved admins may manage users only inside their own company (also enforced by RLS below).
+  if public.is_company_admin(old.company_id) then
+    return new;
+  end if;
+
+  -- Normal users may update only their own non-privileged fields; role/status/company are protected.
+  if old.user_id = auth.uid()
+    and new.user_id = old.user_id
+    and new.company_id is not distinct from old.company_id
+    and new.role = old.role
+    and new.status = old.status then
+    return new;
+  end if;
+
+  raise exception 'Não tem permissão para alterar role, status ou empresa deste perfil.';
+end;
+$$;
+
+create trigger profiles_prevent_privilege_escalation before update on public.profiles for each row execute function public.prevent_profile_privilege_escalation();
 create trigger tasks_set_updated_at before update on public.tasks for each row execute function public.set_updated_at();
 
 create function public.my_company_id() returns uuid language sql stable security definer set search_path = public as $$
@@ -149,10 +176,29 @@ create function public.is_company_admin(target_company uuid) returns boolean lan
 $$;
 
 create function public.handle_new_auth_user() returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  metadata_company_id uuid;
 begin
-  insert into public.profiles (user_id, name, role, status)
-  values (new.id, coalesce(split_part(new.email, '@', 1), 'utilizador'), 'user', 'pending')
-  on conflict (user_id) do nothing;
+  select c.id into metadata_company_id
+  from public.companies c
+  where c.code = nullif(new.raw_user_meta_data->>'company_code', '')
+  limit 1;
+
+  if metadata_company_id is null then
+    metadata_company_id := nullif(new.raw_user_meta_data->>'company_id', '')::uuid;
+  end if;
+
+  insert into public.profiles (user_id, company_id, name, role, status)
+  values (
+    new.id,
+    metadata_company_id,
+    coalesce(nullif(new.raw_user_meta_data->>'name', ''), split_part(new.email, '@', 1), 'utilizador'),
+    'user',
+    'pending'
+  )
+  on conflict (user_id) do update set
+    company_id = coalesce(public.profiles.company_id, excluded.company_id),
+    name = coalesce(nullif(public.profiles.name, ''), excluded.name);
   return new;
 end;
 $$;
@@ -200,7 +246,11 @@ create policy "delete requests company read" on public.task_delete_requests for 
 create policy "delete requests company insert" on public.task_delete_requests for insert with check (requested_by = auth.uid() and exists (select 1 from public.tasks t where t.id = task_id and t.company_id = public.my_company_id()));
 create policy "delete requests admin update" on public.task_delete_requests for update using (exists (select 1 from public.tasks t where t.id = task_id and public.is_company_admin(t.company_id))) with check (exists (select 1 from public.tasks t where t.id = task_id and public.is_company_admin(t.company_id)));
 
--- Promote the first administrator after creating the auth user for this email.
+-- First administrator bootstrap (run once only):
+-- 1) Create the first admin through the app's "Criar conta" button using company code XHUB-26.
+-- 2) Run the UPDATE below once in the Supabase SQL editor to promote that profile.
+-- 3) After this, all new users are created as role='user' and status='pending' automatically;
+--    the approved admin manages approvals in the app, so no more manual SQL is needed.
 update public.profiles p
 set role = 'admin', status = 'approved', company_id = c.id, updated_at = now()
 from auth.users u, public.companies c

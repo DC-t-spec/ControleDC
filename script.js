@@ -10,6 +10,8 @@
   let company = null;
   let resources = [];
   let profiles = [];
+  const schemaSupport = { coworkPayments: true, taskApprovals: true };
+
 
   const el = (id) => document.getElementById(id);
   const pad2 = (n) => String(n).padStart(2, "0");
@@ -24,6 +26,11 @@
   const currentUserId = () => session?.user?.id || null;
 
   function message(id, text) { const node = el(id); if (node) node.textContent = text; }
+  function isMissingSchemaError(error) {
+    const text = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""} ${error?.code || ""}`.toLowerCase();
+    return ["does not exist", "could not find", "schema cache", "relationship", "column", "table"].some((term) => text.includes(term));
+  }
+
   function showAuth(text = "—") { el("authScreen")?.classList.remove("hidden"); el("appRoot")?.classList.add("app-locked"); message("authMsg", text); }
   function hideAuth() { el("authScreen")?.classList.add("hidden"); el("appRoot")?.classList.remove("app-locked"); }
   function openModal(id) { const node = el(id); if (node) node.style.display = "grid"; }
@@ -226,12 +233,42 @@
     URL.revokeObjectURL(url);
   }
 
+  async function queryCoworkMembers() {
+    let result = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("company_id", profile.company_id).order("name");
+    if (result.error && isMissingSchemaError(result.error)) {
+      schemaSupport.coworkPayments = false;
+      result = await supabase.from("cowork_members").select("*").eq("company_id", profile.company_id).order("name");
+    } else {
+      schemaSupport.coworkPayments = true;
+    }
+    return result;
+  }
+
+  async function queryTasks(options = {}) {
+    const { excludeRejected = false, pendingOnly = false, orderCreatedDesc = false, all = false } = options;
+    let q = supabase.from("tasks").select("*").eq("company_id", profile.company_id);
+    if (excludeRejected) q = q.neq("approval_status", "rejected");
+    if (pendingOnly) q = q.eq("approval_status", "pending");
+    if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
+    q = orderCreatedDesc ? q.order("created_at", { ascending: false }) : q.order("due_date");
+    let result = await q;
+    if (result.error && isMissingSchemaError(result.error) && (excludeRejected || pendingOnly)) {
+      schemaSupport.taskApprovals = false;
+      q = supabase.from("tasks").select("*").eq("company_id", profile.company_id);
+      if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
+      result = orderCreatedDesc ? await q.order("created_at", { ascending: false }) : await q.order("due_date");
+    } else if (!result.error) {
+      schemaSupport.taskApprovals = true;
+    }
+    return result;
+  }
+
   async function getOperationalData(from, to) {
     const [{ data: reservations, error: er }, { data: members, error: em }, { data: passes, error: ep }, { data: tasks, error: et }] = await Promise.all([
       supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
-      supabase.from("cowork_members").select("*, cowork_payments(*)").eq("company_id", profile.company_id).order("name"),
+      queryCoworkMembers(),
       supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).gte("date", ymd(from)).lte("date", ymd(to)).order("date", { ascending: false }),
-      supabase.from("tasks").select("*").eq("company_id", profile.company_id).neq("approval_status", "rejected").order("due_date")
+      queryTasks({ excludeRejected: true, all: true })
     ]);
     if (er) throw er; if (em) throw em; if (ep) throw ep; if (et) throw et;
     return { reservations: reservations || [], members: members || [], passes: passes || [], tasks: tasks || [] };
@@ -337,7 +374,7 @@
 
   async function renderCowork() {
     const [{ data: members, error: e1 }, { data: passes, error: e2 }] = await Promise.all([
-      supabase.from("cowork_members").select("*, cowork_payments(*)").eq("company_id", profile.company_id).order("name"),
+      queryCoworkMembers(),
       supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false })
     ]);
     if (e1) throw e1; if (e2) throw e2;
@@ -349,7 +386,7 @@
   async function openMember(id = "") {
     el("memberId").value = id; message("memberMsg", "—");
     if (!id) { ["memberName", "memberStart", "memberEnd", "memberTotal", "memberAmount", "memberNext", "paymentAmount", "paymentReference", "paymentNotes"].forEach((x) => el(x).value = ""); el("memberPlan").value = "monthly"; el("memberPaymentType").value = "monthly"; el("memberStatus").value = "active"; el("memberPaymentsList").innerHTML = '<p class="muted">Guarde o membro para registar pagamentos.</p>'; }
-    else { const { data, error } = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("id", id).single(); if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberPaymentType").value = data.payment_type || "monthly"; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberTotal").value = data.total_value || 0; el("memberAmount").value = data.amount_paid; el("memberNext").value = data.next_payment_date || ""; el("memberStatus").value = memberComputedStatus(data); el("memberPaymentsList").innerHTML = (data.cowork_payments || []).sort((a,b) => new Date(b.payment_date) - new Date(a.payment_date)).map((p) => `<div class="item compact"><div><div class="item-title">${money(p.amount)} • ${html(p.payment_method || "—")}</div><div class="item-meta">${p.payment_date} • ${html(p.reference || "sem referência")} • ${html(p.notes || "")}</div></div></div>`).join("") || '<p class="muted">Sem pagamentos registados.</p>'; }
+    else { let { data, error } = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("id", id).single(); if (error && isMissingSchemaError(error)) { schemaSupport.coworkPayments = false; const fallback = await supabase.from("cowork_members").select("*").eq("id", id).single(); data = fallback.data; error = fallback.error; } if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberPaymentType").value = data.payment_type || "monthly"; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberTotal").value = data.total_value || 0; el("memberAmount").value = data.amount_paid; el("memberNext").value = data.next_payment_date || ""; el("memberStatus").value = memberComputedStatus(data); el("memberPaymentsList").innerHTML = (data.cowork_payments || []).sort((a,b) => new Date(b.payment_date) - new Date(a.payment_date)).map((p) => `<div class="item compact"><div><div class="item-title">${money(p.amount)} • ${html(p.payment_method || "—")}</div><div class="item-meta">${p.payment_date} • ${html(p.reference || "sem referência")} • ${html(p.notes || "")}</div></div></div>`).join("") || '<p class="muted">Sem pagamentos registados.</p>'; }
     openModal("memberModal");
   }
 
@@ -357,7 +394,12 @@
     const id = el("memberId").value;
     const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value, payment_type: el("memberPaymentType").value, start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, total_value: Number(el("memberTotal").value || 0), amount_paid: Number(el("memberAmount").value || 0), next_payment_date: el("memberNext").value || null, status: el("memberStatus").value };
     if (!payload.name) throw new Error("Nome obrigatório.");
-    const result = id ? await supabase.from("cowork_members").update(payload).eq("id", id) : await supabase.from("cowork_members").insert(payload);
+    let result = id ? await supabase.from("cowork_members").update(payload).eq("id", id) : await supabase.from("cowork_members").insert(payload);
+    if (result.error && isMissingSchemaError(result.error)) {
+      const legacyStatus = { expired: "ended", cancelled: "inactive", pending: "active", overdue: "active" }[payload.status] || payload.status;
+      const legacyPayload = { company_id: payload.company_id, name: payload.name, plan: payload.plan, start_date: payload.start_date, end_date: payload.end_date, amount_paid: payload.amount_paid, status: legacyStatus };
+      result = id ? await supabase.from("cowork_members").update(legacyPayload).eq("id", id) : await supabase.from("cowork_members").insert(legacyPayload);
+    }
     if (result.error) throw result.error;
     closeModal("memberModal"); await renderCowork(); await renderDashboard();
   }
@@ -369,8 +411,11 @@
     if (amount <= 0) throw new Error("Informe o valor pago.");
     const { data: member, error: readError } = await supabase.from("cowork_members").select("amount_paid,total_value").eq("id", memberId).single();
     if (readError) throw readError;
-    const { error } = await supabase.from("cowork_payments").insert({ cowork_member_id: memberId, company_id: profile.company_id, payment_date: ymd(new Date()), amount, payment_method: el("paymentMethod").value, reference: el("paymentReference").value.trim(), notes: el("paymentNotes").value.trim(), created_by: currentUserId() });
-    if (error) throw error;
+    if (schemaSupport.coworkPayments) {
+      const { error } = await supabase.from("cowork_payments").insert({ cowork_member_id: memberId, company_id: profile.company_id, payment_date: ymd(new Date()), amount, payment_method: el("paymentMethod").value, reference: el("paymentReference").value.trim(), notes: el("paymentNotes").value.trim(), created_by: currentUserId() });
+      if (error && isMissingSchemaError(error)) schemaSupport.coworkPayments = false;
+      else if (error) throw error;
+    }
     const { error: updateError } = await supabase.from("cowork_members").update({ amount_paid: Number(member.amount_paid || 0) + amount }).eq("id", memberId);
     if (updateError) throw updateError;
     await openMember(memberId); await renderCowork(); await renderDashboard();
@@ -385,9 +430,7 @@
   }
 
   async function fetchTasks(all = false) {
-    let q = supabase.from("tasks").select("*").eq("company_id", profile.company_id).order("due_date");
-    if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
-    const { data, error } = await q;
+    const { data, error } = await queryTasks({ all });
     if (error) throw error;
     return data || [];
   }
@@ -424,9 +467,17 @@
   async function saveTask() {
     const id = el("taskId").value;
     const payload = { company_id: profile.company_id, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), priority: el("taskPriority").value, due_date: el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null, status: el("taskStatus").value, responsible_id: el("taskResponsible").value || null };
-    if (!id) { payload.created_by = currentUserId(); payload.approval_status = isAdmin() ? "approved" : "pending"; payload.approved_by = isAdmin() ? currentUserId() : null; payload.approved_at = isAdmin() ? new Date().toISOString() : null; }
+    if (!id) {
+      payload.created_by = currentUserId();
+      if (schemaSupport.taskApprovals) { payload.approval_status = isAdmin() ? "approved" : "pending"; payload.approved_by = isAdmin() ? currentUserId() : null; payload.approved_at = isAdmin() ? new Date().toISOString() : null; }
+    }
     if (!payload.title) throw new Error("Título obrigatório.");
-    const result = id ? await supabase.from("tasks").update(payload).eq("id", id).select("id").single() : await supabase.from("tasks").insert(payload).select("id").single();
+    let result = id ? await supabase.from("tasks").update(payload).eq("id", id).select("id").single() : await supabase.from("tasks").insert(payload).select("id").single();
+    if (result.error && isMissingSchemaError(result.error) && ("approval_status" in payload || "approved_by" in payload || "approved_at" in payload)) {
+      schemaSupport.taskApprovals = false;
+      delete payload.approval_status; delete payload.approved_by; delete payload.approved_at;
+      result = id ? await supabase.from("tasks").update(payload).eq("id", id).select("id").single() : await supabase.from("tasks").insert(payload).select("id").single();
+    }
     if (result.error) throw result.error;
     const note = el("taskNote").value.trim();
     if (note) { const { error } = await supabase.from("task_updates").insert({ task_id: result.data.id, user_id: currentUserId(), note }); if (error) throw error; }
@@ -444,13 +495,14 @@
   async function renderApprovals() {
     if (!isAdmin()) { message("approvalsMsg", "Área reservada a administradores."); return; }
     const pending = profiles.filter((p) => p.status === "pending");
-    const { data: pendingTasks, error: taskApprovalError } = await supabase.from("tasks").select("*").eq("company_id", profile.company_id).eq("approval_status", "pending").order("created_at", { ascending: false });
+    const { data: pendingTasks, error: taskApprovalError } = await queryTasks({ pendingOnly: true, orderCreatedDesc: true, all: true });
     if (taskApprovalError) throw taskApprovalError;
-    message("approvalsMsg", `${pending.length} utilizador(es) e ${(pendingTasks || []).length} actividade(s) pendente(s).`);
+    const taskApprovalRows = schemaSupport.taskApprovals ? (pendingTasks || []) : [];
+    message("approvalsMsg", `${pending.length} utilizador(es) e ${taskApprovalRows.length} actividade(s) pendente(s).${schemaSupport.taskApprovals ? "" : " Execute supabase_migration_v2.sql para activar aprovações de actividades."}`);
     el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><div class="row"><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button><button class="btn sm danger" data-reject="${p.user_id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
     document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
     document.querySelectorAll("[data-reject]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "rejected" }).eq("user_id", b.dataset.reject).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
-    el("taskApprovalsList").innerHTML = (pendingTasks || []).map((t) => `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.description || "Sem descrição")} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><div class="row"><button class="btn sm primary" data-approve-task="${t.id}">Aprovar</button><button class="btn sm danger" data-reject-task="${t.id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem actividades pendentes.</p>';
+    el("taskApprovalsList").innerHTML = taskApprovalRows.map((t) => `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.description || "Sem descrição")} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><div class="row"><button class="btn sm primary" data-approve-task="${t.id}">Aprovar</button><button class="btn sm danger" data-reject-task="${t.id}">Rejeitar</button></div></div>`).join("") || `<p class="muted">${schemaSupport.taskApprovals ? "Sem actividades pendentes." : "Aprovações de actividades ainda não migradas."}</p>`;
     document.querySelectorAll("[data-approve-task]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("tasks").update({ approval_status: "approved", approved_by: currentUserId(), approved_at: new Date().toISOString() }).eq("id", b.dataset.approveTask).eq("company_id", profile.company_id); if (error) throw error; await renderApprovals(); await renderTasks(); await renderDashboard(); });
     document.querySelectorAll("[data-reject-task]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("tasks").update({ approval_status: "rejected", approved_by: currentUserId(), approved_at: new Date().toISOString() }).eq("id", b.dataset.rejectTask).eq("company_id", profile.company_id); if (error) throw error; await renderApprovals(); await renderTasks(); await renderDashboard(); });
     const { data, error } = await supabase.from("task_delete_requests").select("*, tasks(company_id,title)").order("created_at", { ascending: false });

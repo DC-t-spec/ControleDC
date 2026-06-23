@@ -60,44 +60,30 @@
     return Boolean(data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0);
   }
 
-  async function saveSignupProfile(userId, foundCompany, email) {
+  async function saveSignupProfile(userId, email) {
     if (!userId) throw new Error("Não foi possível obter o ID do utilizador criado pelo Supabase Auth.");
-    const name = email.split("@")[0] || "utilizador";
-    const payload = {
-      user_id: userId,
-      company_id: foundCompany.id,
-      name,
-      role: "user",
-      status: "pending"
-    };
-
     const { data: existingProfile, error: readError } = await supabase.from("profiles").select("user_id").eq("user_id", userId).maybeSingle();
     if (readError) throw readError;
+    if (existingProfile) return;
 
-    if (existingProfile) {
-      const { error: updateError } = await supabase.from("profiles").update({
-        company_id: foundCompany.id,
-        name,
-        role: "user",
-        status: "pending"
-      }).eq("user_id", userId);
-      if (updateError) throw updateError;
-      return;
-    }
+    const { data: defaultCompany, error: companyError } = await supabase.from("companies").select("id").eq("code", "XHUB-26").maybeSingle();
+    if (companyError) throw companyError;
+    if (!defaultCompany) throw new Error("Empresa padrão não encontrada. Contacte o administrador.");
 
-    const { error: insertError } = await supabase.from("profiles").insert(payload);
+    const { error: insertError } = await supabase.from("profiles").insert({
+      user_id: userId,
+      company_id: defaultCompany.id,
+      name: email.split("@")[0] || "utilizador",
+      role: "user",
+      status: "pending"
+    });
     if (insertError) throw insertError;
   }
 
   async function signup() {
     const email = el("authEmail").value.trim().toLowerCase();
     const password = el("authPass").value;
-    const code = el("authCode").value.trim().toUpperCase();
-    if (!email || !password || !code) throw new Error("Preencha email, senha e código da empresa.");
-
-    const { data: foundCompany, error: companyError } = await supabase.from("companies").select("id,name,code").eq("code", code).maybeSingle();
-    if (companyError) throw companyError;
-    if (!foundCompany) throw new Error("Código da empresa inválido.");
+    if (!email || !password) throw new Error("Preencha email e senha.");
 
     const name = email.split("@")[0] || "utilizador";
     const { data, error } = await supabase.auth.signUp({
@@ -105,8 +91,6 @@
       password,
       options: {
         data: {
-          company_id: foundCompany.id,
-          company_code: foundCompany.code,
           name
         }
       }
@@ -120,7 +104,7 @@
 
     if (data.session) {
       session = data.session;
-      await saveSignupProfile(user.id, foundCompany, email);
+      await saveSignupProfile(user.id, email);
       await supabase.auth.signOut();
       session = null;
     }
@@ -131,17 +115,15 @@
   async function login() {
     const email = el("authEmail").value.trim().toLowerCase();
     const password = el("authPass").value;
-    const code = el("authCode").value.trim().toUpperCase();
-    if (!email || !password || !code) throw new Error("Preencha email, senha e código da empresa.");
+    if (!email || !password) throw new Error("Preencha email e senha.");
 
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw new Error("Email ou senha inválidos.");
     session = data.session;
 
     const loaded = await loadProfile();
-    if (!loaded?.company_id) throw new Error("Perfil não encontrado para este utilizador. Contacte o administrador.");
+    if (!loaded?.company_id) throw new Error("Perfil não encontrado. Contacte o administrador.");
     if (loaded.status !== "approved") throw new Error("Conta pendente de aprovação.");
-    if (company?.code !== code) throw new Error("Código da empresa não corresponde ao seu perfil.");
   }
 
   async function logout() {
@@ -587,7 +569,7 @@
       await loadSession();
       if (!session) return showAuth();
       await loadProfile();
-      if (!profile?.company_id) return showAuth("Perfil não encontrado para este utilizador.");
+      if (!profile?.company_id) return showAuth("Perfil não encontrado. Contacte o administrador.");
       if (profile.status !== "approved") return showAuth("Conta pendente de aprovação.");
       await loadBaseData();
       hideAuth();

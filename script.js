@@ -16,6 +16,9 @@
   const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const fmt = (v) => new Date(v).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" });
   const money = (v) => `${Number(v || 0).toLocaleString("pt-PT")} MT`;
+  const isActiveReservation = (r) => !["cancelled", "checked_out"].includes(r.status);
+  const csvEscape = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+  const dateRangeDays = (from, to) => Math.max(1, Math.ceil((to - from) / 86400000));
   const html = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   const isAdmin = () => profile?.role === "admin";
   const currentUserId = () => session?.user?.id || null;
@@ -170,22 +173,79 @@
   }
 
   async function queryReservations(from, to) {
-    const { data, error } = await supabase.from("reservations").select("*").eq("company_id", profile.company_id).gte("start_at", from.toISOString()).lte("start_at", to.toISOString()).order("start_at");
+    const { data, error } = await supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at");
     if (error) throw error;
     return data || [];
   }
 
+  function resourceName(id) {
+    return resources.find((r) => r.id === id)?.name || "Espaço";
+  }
+
+  function statusBadge(label, kind = "ok") {
+    return `<span class="badge ${kind}">${html(label)}</span>`;
+  }
+
+  function buildSpaceStatus(rows, now = new Date()) {
+    return resources.filter((r) => r.type !== "cowork").map((resource) => {
+      const related = rows.filter((r) => r.resource_id === resource.id && isActiveReservation(r));
+      const current = related.find((r) => new Date(r.start_at) <= now && new Date(r.end_at) > now);
+      const next = related.find((r) => new Date(r.start_at) > now);
+      return { resource, current, next };
+    });
+  }
+
+  function downloadCsv(filename, rows) {
+    const blob = new Blob([rows.map((row) => row.map(csvEscape).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function getOperationalData(from, to) {
+    const [{ data: reservations, error: er }, { data: members, error: em }, { data: passes, error: ep }, { data: tasks, error: et }] = await Promise.all([
+      supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
+      supabase.from("cowork_members").select("*").eq("company_id", profile.company_id).order("name"),
+      supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).gte("date", ymd(from)).lte("date", ymd(to)).order("date", { ascending: false }),
+      supabase.from("tasks").select("*").eq("company_id", profile.company_id).order("due_date")
+    ]);
+    if (er) throw er; if (em) throw em; if (ep) throw ep; if (et) throw et;
+    return { reservations: reservations || [], members: members || [], passes: passes || [], tasks: tasks || [] };
+  }
+
   async function renderDashboard() {
     message("nowLabel", `Agora: ${fmt(new Date())}`);
-    const start = new Date(); start.setHours(0, 0, 0, 0);
-    const end = new Date(); end.setHours(23, 59, 59, 999);
-    const rows = await queryReservations(start, end);
-    message("todayMeta", `${rows.length} reserva(s)`);
-    el("todayList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas hoje.</p>';
-    const { data: members } = await supabase.from("cowork_members").select("amount_paid,status").eq("company_id", profile.company_id);
-    const activeMembers = (members || []).filter((m) => m.status === "active");
-    message("cwOcc", `${activeMembers.length} mensalista(s) ativo(s)`);
-    message("cwRevenue", `Receita mensal registada: ${money(activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0))}`);
+    const today = new Date();
+    const start = new Date(today); start.setHours(0, 0, 0, 0);
+    const end = new Date(today); end.setHours(23, 59, 59, 999);
+    const weekEnd = new Date(start); weekEnd.setDate(weekEnd.getDate() + 7);
+    const { reservations: rows, members, passes, tasks } = await getOperationalData(start, end);
+    const activeMembers = members.filter((m) => m.status === "active");
+    const expiredMembers = members.filter((m) => m.status === "ended" || (m.end_date && new Date(`${m.end_date}T23:59:59`) < today));
+    const daypassesToday = passes.filter((p) => p.date === ymd(today));
+    const reservationRevenue = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
+    const coworkRevenue = activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
+
+    el("dashMetrics").innerHTML = [
+      ["Cowork activo", activeMembers.length, "ok"],
+      ["Cowork expirado", expiredMembers.length, expiredMembers.length ? "warn" : "ok"],
+      ["Daypasses hoje", daypassesToday.length, "ok"],
+      ["Reservas hoje", rows.length, "ok"],
+      ["Receita hoje", money(reservationRevenue + coworkRevenue), "ok"]
+    ].map(([label, value, kind]) => `<div class="metric-card"><span>${label}</span><strong>${html(value)}</strong>${statusBadge(kind === "warn" ? "Atenção" : "Operacional", kind)}</div>`).join("");
+
+    message("todayMeta", `${rows.length} reserva(s) • ${money(reservationRevenue)}`);
+    el("todayList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)} ${statusBadge(r.status, r.status === "cancelled" ? "bad" : "ok")}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas hoje.</p>';
+    message("cwOcc", `${activeMembers.length} activo(s), ${expiredMembers.length} expirado(s), ${daypassesToday.length} diária(s) hoje`);
+    message("cwRevenue", `Receita cowork do dia/mês: ${money(coworkRevenue)}`);
+
+    const weekReservations = await queryReservations(start, weekEnd);
+    el("spaceStatusList").innerHTML = buildSpaceStatus(weekReservations).map(({ resource, current, next }) => {
+      const free = !current;
+      return `<div class="item space-state"><div><div class="item-title">${html(resource.name)} ${statusBadge(free ? "Livre agora" : "Ocupado agora", free ? "ok" : "bad")}</div><div class="item-meta">${current ? `${html(current.client_name)} até ${fmt(current.end_at)}` : "Disponível neste momento"}</div><div class="item-meta">Próxima reserva: ${next ? `${html(next.client_name)} • ${fmt(next.start_at)}` : "sem reserva nos próximos 7 dias"}</div></div></div>`;
+    }).join("") || '<p class="muted">Sem espaços operacionais.</p>';
+    el("taskDigest").innerHTML = tasks.slice(0, 4).map((t) => `<div class="item compact"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.status)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div></div>`).join("") || '<p class="muted">Sem actividades recentes.</p>';
   }
 
   async function renderReservations() {
@@ -230,6 +290,22 @@
     const { error } = await supabase.from("reservations").delete().eq("id", id);
     if (error) throw error;
     closeModal("reservationModal"); await renderReservations(); await renderDashboard();
+  }
+
+  function renderAgenda(rows) {
+    const grouped = resources.filter((r) => r.type !== "cowork").map((resource) => ({
+      resource,
+      rows: rows.filter((r) => r.resource_id === resource.id).sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+    }));
+    el("agendaList").innerHTML = grouped.map(({ resource, rows }) => `<div class="card agenda-card"><div class="topline"><h3>${html(resource.name)}</h3><span class="pill">${rows.length} reserva(s)</span></div>${rows.map((r) => `<div class="item compact"><div><div class="item-title">${html(r.client_name)} ${statusBadge(r.status, r.status === "cancelled" ? "bad" : "ok")}</div><div class="item-meta">${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas neste período.</p>'}</div>`).join("");
+  }
+
+  async function renderAgendaView() {
+    const day = el("agendaDay").value || ymd(new Date()); el("agendaDay").value = day;
+    const mode = el("agendaMode").value || "day";
+    const start = new Date(`${day}T00:00:00`);
+    const end = new Date(start); end.setDate(end.getDate() + (mode === "week" ? 7 : 1));
+    renderAgenda(await queryReservations(start, end));
   }
 
   async function renderCowork() {
@@ -338,10 +414,37 @@
 
   async function renderReports() {
     const from = el("repFrom").value || ymd(new Date()); const to = el("repTo").value || from; el("repFrom").value = from; el("repTo").value = to;
-    const rows = await queryReservations(new Date(`${from}T00:00:00`), new Date(`${to}T23:59:59`));
-    const total = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
-    message("reportsMsg", `${rows.length} reserva(s), total ${money(total)}.`);
-    el("reportsList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${fmt(r.start_at)} • ${money(r.total_price)}</div></div></div>`).join("");
+    const start = new Date(`${from}T00:00:00`); const end = new Date(`${to}T23:59:59`);
+    const { reservations: rows, members, passes } = await getOperationalData(start, end);
+    const reservationTotal = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
+    const passTotal = passes.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
+    const activeMembers = members.filter((m) => m.status === "active");
+    const memberTotal = activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0);
+    const capacityDays = Math.max(1, resources.filter((r) => r.type !== "cowork").length * dateRangeDays(start, end));
+    const occupation = Math.round((new Set(rows.filter(isActiveReservation).map((r) => `${r.resource_id}-${ymd(new Date(r.start_at))}`)).size / capacityDays) * 100);
+    message("reportsMsg", `${rows.length} reserva(s), ocupação ${occupation}%, receitas ${money(reservationTotal + passTotal + memberTotal)}.`);
+    el("reportsList").innerHTML = `
+      <div class="grid cols4">
+        <div class="metric-card"><span>Ocupação</span><strong>${occupation}%</strong></div>
+        <div class="metric-card"><span>Reservas</span><strong>${rows.length}</strong></div>
+        <div class="metric-card"><span>Cowork</span><strong>${activeMembers.length}</strong></div>
+        <div class="metric-card"><span>Receitas</span><strong>${money(reservationTotal + passTotal + memberTotal)}</strong></div>
+      </div>
+      <div class="row report-actions">
+        <button class="btn sm" data-csv="occupation">CSV ocupação</button>
+        <button class="btn sm" data-csv="reservations">CSV reservas</button>
+        <button class="btn sm" data-csv="cowork">CSV cowork</button>
+        <button class="btn sm" data-csv="revenue">CSV receitas</button>
+      </div>
+      ${rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem dados no período.</p>'}
+    `;
+    document.querySelectorAll("[data-csv]").forEach((b) => b.onclick = () => {
+      const kind = b.dataset.csv;
+      if (kind === "occupation") downloadCsv(`ocupacao-${from}-${to}.csv`, [["espaco", "reservas", "ocupado_agora"], ...resources.filter((r) => r.type !== "cowork").map((resource) => [resource.name, rows.filter((x) => x.resource_id === resource.id).length, buildSpaceStatus(rows).find((x) => x.resource.id === resource.id)?.current ? "sim" : "nao"])]);
+      if (kind === "reservations") downloadCsv(`reservas-${from}-${to}.csv`, [["cliente", "espaco", "inicio", "fim", "estado", "valor"], ...rows.map((r) => [r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price])]);
+      if (kind === "cowork") downloadCsv(`cowork-${from}-${to}.csv`, [["tipo", "cliente", "estado_data", "valor"], ...members.map((m) => ["mensalista", m.name, m.status, m.amount_paid]), ...passes.map((p) => ["daypass", p.client_name, p.date, p.amount_paid])]);
+      if (kind === "revenue") downloadCsv(`receitas-${from}-${to}.csv`, [["origem", "descricao", "data", "valor"], ...rows.map((r) => ["reserva", `${resourceName(r.resource_id)} - ${r.client_name}`, r.start_at, r.total_price]), ...passes.map((p) => ["daypass", p.client_name, p.date, p.amount_paid]), ...activeMembers.map((m) => ["cowork", m.name, m.end_date || "activo", m.amount_paid])]);
+    });
   }
 
   async function showScreen(name) {
@@ -351,6 +454,7 @@
     if (name === "dash") await renderDashboard();
     if (name === "reservas") await renderReservations();
     if (name === "cowork") await renderCowork();
+    if (name === "agenda") await renderAgendaView();
     if (name === "tasks") await renderTasks();
     if (name === "team") await renderTeam();
     if (name === "approvals") await renderApprovals();
@@ -366,6 +470,7 @@
     el("resDay").onchange = renderReservations; el("resFilterResource").onchange = renderReservations;
     el("btnAddMember").onclick = () => openMember(); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));
     el("btnCreateTask").onclick = () => openTask(); el("btnCloseTask").onclick = () => closeModal("taskModal"); el("btnSaveTask").onclick = () => saveTask().catch((e) => message("taskMsg", e.message)); el("btnDeleteTask").onclick = () => requestTaskRemoval().catch((e) => message("taskMsg", e.message)); el("taskStatusFilter").onchange = renderTasks;
+    el("agendaDay").onchange = renderAgendaView; el("agendaMode").onchange = renderAgendaView;
     el("btnRunReports").onclick = renderReports;
   }
 
@@ -373,6 +478,7 @@
     bind();
     if (el("resDay")) el("resDay").value = ymd(new Date());
     if (el("daypassDate")) el("daypassDate").value = ymd(new Date());
+    if (el("agendaDay")) el("agendaDay").value = ymd(new Date());
     try {
       await loadSession();
       if (!session) return showAuth();
@@ -382,7 +488,7 @@
       await loadBaseData();
       hideAuth();
       await showScreen("dash");
-      setInterval(() => { if (!el("scr-dash")?.hidden) renderDashboard(); }, 30000);
+      setInterval(() => { if (!el("scr-dash")?.hidden) renderDashboard(); if (!el("scr-agenda")?.hidden) renderAgendaView(); }, 30000);
     } catch (e) { showAuth(e.message || String(e)); }
   }
 

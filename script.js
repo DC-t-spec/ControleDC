@@ -157,8 +157,27 @@
     fillPeopleSelect();
   }
 
+  const BOOKABLE_RESOURCE_CODES = new Set(["r_green_studio", "r_blue_studio", "r_meeting_room", "r_stage"]);
+
   function operationalResources() {
-    return resources.filter((r) => r.active !== false);
+    return resources.filter((r) => r.active !== false && BOOKABLE_RESOURCE_CODES.has(r.code));
+  }
+
+  function resourceCategoryName(resourceId) {
+    const code = resources.find((r) => r.id === resourceId)?.code;
+    if (code === "r_green_studio") return "A. Reservas de Estúdio Verde";
+    if (code === "r_blue_studio") return "B. Reservas de Estúdio Azul";
+    if (code === "r_meeting_room") return "C. Reservas de Sala de Reuniões";
+    if (code === "r_stage") return "D. Reservas de Palco / Espaço para Actividades";
+    return "H. Outras receitas";
+  }
+
+  function memberBalance(m) { return Number(m.total_value || 0) - Number(m.amount_paid || 0); }
+  function memberComputedStatus(m, now = new Date()) {
+    if (["cancelled", "expired"].includes(m.status)) return m.status;
+    if (m.end_date && new Date(`${m.end_date}T23:59:59`) < now) return "expired";
+    if (m.next_payment_date && memberBalance(m) > 0 && new Date(`${m.next_payment_date}T23:59:59`) < now) return "overdue";
+    return m.status || "active";
   }
 
   function fillResourceSelects() {
@@ -210,9 +229,9 @@
   async function getOperationalData(from, to) {
     const [{ data: reservations, error: er }, { data: members, error: em }, { data: passes, error: ep }, { data: tasks, error: et }] = await Promise.all([
       supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
-      supabase.from("cowork_members").select("*").eq("company_id", profile.company_id).order("name"),
+      supabase.from("cowork_members").select("*, cowork_payments(*)").eq("company_id", profile.company_id).order("name"),
       supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).gte("date", ymd(from)).lte("date", ymd(to)).order("date", { ascending: false }),
-      supabase.from("tasks").select("*").eq("company_id", profile.company_id).order("due_date")
+      supabase.from("tasks").select("*").eq("company_id", profile.company_id).neq("approval_status", "rejected").order("due_date")
     ]);
     if (er) throw er; if (em) throw em; if (ep) throw ep; if (et) throw et;
     return { reservations: reservations || [], members: members || [], passes: passes || [], tasks: tasks || [] };
@@ -225,31 +244,35 @@
     const end = new Date(today); end.setHours(23, 59, 59, 999);
     const weekEnd = new Date(start); weekEnd.setDate(weekEnd.getDate() + 7);
     const { reservations: rows, members, passes, tasks } = await getOperationalData(start, end);
-    const activeMembers = members.filter((m) => m.status === "active");
-    const expiredMembers = members.filter((m) => m.status === "ended" || (m.end_date && new Date(`${m.end_date}T23:59:59`) < today));
+    const activeMembers = members.filter((m) => memberComputedStatus(m, today) === "active");
+    const overdueMembers = members.filter((m) => memberComputedStatus(m, today) === "overdue");
+    const expiredMembers = members.filter((m) => ["expired", "cancelled"].includes(memberComputedStatus(m, today)));
     const daypassesToday = passes.filter((p) => p.date === ymd(today));
     const reservationRevenue = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
-    const coworkRevenue = activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const coworkPaymentsMonth = members.flatMap((m) => m.cowork_payments || []).filter((p) => new Date(p.payment_date) >= monthStart);
+    const coworkRevenue = coworkPaymentsMonth.reduce((a, p) => a + Number(p.amount || 0), 0) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
+    const pendingTasks = tasks.filter((t) => t.approval_status === "pending").length;
 
     el("dashMetrics").innerHTML = [
       ["Cowork activo", activeMembers.length, "ok"],
-      ["Cowork expirado", expiredMembers.length, expiredMembers.length ? "warn" : "ok"],
-      ["Daypasses hoje", daypassesToday.length, "ok"],
+      ["Cowork em atraso", overdueMembers.length, overdueMembers.length ? "warn" : "ok"],
       ["Reservas hoje", rows.length, "ok"],
-      ["Receita hoje", money(reservationRevenue + coworkRevenue), "ok"]
+      ["Pagamentos mês", money(coworkRevenue), "ok"],
+      ["Actividades pendentes", pendingTasks, pendingTasks ? "warn" : "ok"]
     ].map(([label, value, kind]) => `<div class="metric-card"><span>${label}</span><strong>${html(value)}</strong>${statusBadge(kind === "warn" ? "Atenção" : "Operacional", kind)}</div>`).join("");
 
     message("todayMeta", `${rows.length} reserva(s) • ${money(reservationRevenue)}`);
     el("todayList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)} ${statusBadge(r.status, r.status === "cancelled" ? "bad" : "ok")}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas hoje.</p>';
-    message("cwOcc", `${activeMembers.length} activo(s), ${expiredMembers.length} expirado(s), ${daypassesToday.length} diária(s) hoje`);
-    message("cwRevenue", `Receita cowork do dia/mês: ${money(coworkRevenue)}`);
+    message("cwOcc", `${activeMembers.length} activo(s), ${overdueMembers.length} em atraso, ${expiredMembers.length} expirado(s), ${daypassesToday.length} daypass(es) hoje`);
+    message("cwRevenue", `Pagamentos de cowork recebidos no mês: ${money(coworkRevenue)}`);
 
     const weekReservations = await queryReservations(start, weekEnd);
     el("spaceStatusList").innerHTML = buildSpaceStatus(weekReservations).map(({ resource, current, next }) => {
       const free = !current;
       return `<div class="item space-state"><div><div class="item-title">${html(resource.name)} ${statusBadge(free ? "Livre agora" : "Ocupado agora", free ? "ok" : "bad")}</div><div class="item-meta">${current ? `${html(current.client_name)} até ${fmt(current.end_at)}` : "Disponível neste momento"}</div><div class="item-meta">Próxima reserva: ${next ? `${html(next.client_name)} • ${fmt(next.start_at)}` : "sem reserva nos próximos 7 dias"}</div></div></div>`;
     }).join("") || '<p class="muted">Sem espaços operacionais.</p>';
-    el("taskDigest").innerHTML = tasks.slice(0, 4).map((t) => `<div class="item compact"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.status)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div></div>`).join("") || '<p class="muted">Sem actividades recentes.</p>';
+    el("taskDigest").innerHTML = tasks.filter((t) => t.approval_status !== "rejected").slice(0, 4).map((t) => `<div class="item compact"><div><div class="item-title">${html(t.title)} ${t.approval_status === "pending" ? statusBadge("Aguardando aprovação", "warn") : ""}</div><div class="item-meta">${html(t.status)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div></div>`).join("") || '<p class="muted">Sem actividades recentes.</p>';
   }
 
   async function renderReservations() {
@@ -314,29 +337,43 @@
 
   async function renderCowork() {
     const [{ data: members, error: e1 }, { data: passes, error: e2 }] = await Promise.all([
-      supabase.from("cowork_members").select("*").eq("company_id", profile.company_id).order("name"),
+      supabase.from("cowork_members").select("*, cowork_payments(*)").eq("company_id", profile.company_id).order("name"),
       supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false })
     ]);
     if (e1) throw e1; if (e2) throw e2;
-    el("membersList").innerHTML = (members || []).map((m) => `<div class="item"><div><div class="item-title">${html(m.name)}</div><div class="item-meta">${html(m.plan)} • ${html(m.status)} • ${money(m.amount_paid)}</div></div><button class="btn sm" data-edit-member="${m.id}">Editar</button></div>`).join("") || '<p class="muted">Sem mensalistas.</p>';
+    el("membersList").innerHTML = (members || []).map((m) => `<div class="item"><div><div class="item-title">${html(m.name)} ${statusBadge(memberComputedStatus(m), memberComputedStatus(m) === "overdue" ? "warn" : memberComputedStatus(m) === "active" ? "ok" : "bad")}</div><div class="item-meta">Plano ${html(m.plan)} • pagamento ${html(m.payment_type || "mensal")} • pago ${money(m.amount_paid)} • saldo ${money(memberBalance(m))} • próxima cobrança ${m.next_payment_date || "—"}</div></div><button class="btn sm" data-edit-member="${m.id}">Perfil</button></div>`).join("") || '<p class="muted">Sem membros.</p>';
     document.querySelectorAll("[data-edit-member]").forEach((b) => b.onclick = () => openMember(b.dataset.editMember));
     el("daypassList").innerHTML = (passes || []).map((p) => `<div class="item"><div><div class="item-title">${html(p.client_name)}</div><div class="item-meta">${p.date} • ${money(p.amount_paid)}</div></div></div>`).join("") || '<p class="muted">Sem diárias.</p>';
   }
 
   async function openMember(id = "") {
     el("memberId").value = id; message("memberMsg", "—");
-    if (!id) { ["memberName", "memberPlan", "memberStart", "memberEnd", "memberAmount"].forEach((x) => el(x).value = ""); el("memberStatus").value = "active"; }
-    else { const { data, error } = await supabase.from("cowork_members").select("*").eq("id", id).single(); if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberAmount").value = data.amount_paid; el("memberStatus").value = data.status; }
+    if (!id) { ["memberName", "memberStart", "memberEnd", "memberTotal", "memberAmount", "memberNext", "paymentAmount", "paymentReference", "paymentNotes"].forEach((x) => el(x).value = ""); el("memberPlan").value = "monthly"; el("memberPaymentType").value = "monthly"; el("memberStatus").value = "active"; el("memberPaymentsList").innerHTML = '<p class="muted">Guarde o membro para registar pagamentos.</p>'; }
+    else { const { data, error } = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("id", id).single(); if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberPaymentType").value = data.payment_type || "monthly"; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberTotal").value = data.total_value || 0; el("memberAmount").value = data.amount_paid; el("memberNext").value = data.next_payment_date || ""; el("memberStatus").value = memberComputedStatus(data); el("memberPaymentsList").innerHTML = (data.cowork_payments || []).sort((a,b) => new Date(b.payment_date) - new Date(a.payment_date)).map((p) => `<div class="item compact"><div><div class="item-title">${money(p.amount)} • ${html(p.payment_method || "—")}</div><div class="item-meta">${p.payment_date} • ${html(p.reference || "sem referência")} • ${html(p.notes || "")}</div></div></div>`).join("") || '<p class="muted">Sem pagamentos registados.</p>'; }
     openModal("memberModal");
   }
 
   async function saveMember() {
     const id = el("memberId").value;
-    const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value.trim() || "monthly", start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, amount_paid: Number(el("memberAmount").value || 0), status: el("memberStatus").value };
+    const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value, payment_type: el("memberPaymentType").value, start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, total_value: Number(el("memberTotal").value || 0), amount_paid: Number(el("memberAmount").value || 0), next_payment_date: el("memberNext").value || null, status: el("memberStatus").value };
     if (!payload.name) throw new Error("Nome obrigatório.");
     const result = id ? await supabase.from("cowork_members").update(payload).eq("id", id) : await supabase.from("cowork_members").insert(payload);
     if (result.error) throw result.error;
     closeModal("memberModal"); await renderCowork(); await renderDashboard();
+  }
+
+  async function addCoworkPayment() {
+    const memberId = el("memberId").value;
+    if (!memberId) throw new Error("Abra um membro guardado para registar pagamento.");
+    const amount = Number(el("paymentAmount").value || 0);
+    if (amount <= 0) throw new Error("Informe o valor pago.");
+    const { data: member, error: readError } = await supabase.from("cowork_members").select("amount_paid,total_value").eq("id", memberId).single();
+    if (readError) throw readError;
+    const { error } = await supabase.from("cowork_payments").insert({ cowork_member_id: memberId, company_id: profile.company_id, payment_date: ymd(new Date()), amount, payment_method: el("paymentMethod").value, reference: el("paymentReference").value.trim(), notes: el("paymentNotes").value.trim(), created_by: currentUserId() });
+    if (error) throw error;
+    const { error: updateError } = await supabase.from("cowork_members").update({ amount_paid: Number(member.amount_paid || 0) + amount }).eq("id", memberId);
+    if (updateError) throw updateError;
+    await openMember(memberId); await renderCowork(); await renderDashboard();
   }
 
   async function addDaypass() {
@@ -357,7 +394,8 @@
 
   function taskItem(t) {
     const person = profiles.find((p) => p.user_id === t.responsible_id)?.name || "—";
-    return `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(person)} • ${html(t.status)} • ${html(t.priority)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><button class="btn sm" data-edit-task="${t.id}">Abrir</button></div>`;
+    const approval = t.approval_status === "pending" ? statusBadge("Aguardando aprovação", "warn") : t.approval_status === "rejected" ? statusBadge("Rejeitada", "bad") : statusBadge("Aprovada", "ok");
+    return `<div class="item"><div><div class="item-title">${html(t.title)} ${approval}</div><div class="item-meta">${html(person)} • ${html(t.status)} • ${html(t.priority)} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><button class="btn sm" data-edit-task="${t.id}">Abrir</button></div>`;
   }
 
   async function renderTasks() {
@@ -385,13 +423,14 @@
 
   async function saveTask() {
     const id = el("taskId").value;
-    const payload = { company_id: profile.company_id, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), priority: el("taskPriority").value, due_date: el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null, status: el("taskStatus").value, responsible_id: el("taskResponsible").value || null, created_by: currentUserId() };
+    const payload = { company_id: profile.company_id, title: el("taskTitle").value.trim(), description: el("taskDescription").value.trim(), priority: el("taskPriority").value, due_date: el("taskDue").value ? new Date(el("taskDue").value).toISOString() : null, status: el("taskStatus").value, responsible_id: el("taskResponsible").value || null };
+    if (!id) { payload.created_by = currentUserId(); payload.approval_status = isAdmin() ? "approved" : "pending"; payload.approved_by = isAdmin() ? currentUserId() : null; payload.approved_at = isAdmin() ? new Date().toISOString() : null; }
     if (!payload.title) throw new Error("Título obrigatório.");
     const result = id ? await supabase.from("tasks").update(payload).eq("id", id).select("id").single() : await supabase.from("tasks").insert(payload).select("id").single();
     if (result.error) throw result.error;
     const note = el("taskNote").value.trim();
     if (note) { const { error } = await supabase.from("task_updates").insert({ task_id: result.data.id, user_id: currentUserId(), note }); if (error) throw error; }
-    closeModal("taskModal"); await renderTasks(); await renderTeam();
+    closeModal("taskModal"); await renderTasks(); await renderTeam(); await renderDashboard();
   }
 
   async function requestTaskRemoval() {
@@ -405,10 +444,15 @@
   async function renderApprovals() {
     if (!isAdmin()) { message("approvalsMsg", "Área reservada a administradores."); return; }
     const pending = profiles.filter((p) => p.status === "pending");
-    message("approvalsMsg", `${pending.length} utilizador(es) pendente(s).`);
+    const { data: pendingTasks, error: taskApprovalError } = await supabase.from("tasks").select("*").eq("company_id", profile.company_id).eq("approval_status", "pending").order("created_at", { ascending: false });
+    if (taskApprovalError) throw taskApprovalError;
+    message("approvalsMsg", `${pending.length} utilizador(es) e ${(pendingTasks || []).length} actividade(s) pendente(s).`);
     el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><div class="row"><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button><button class="btn sm danger" data-reject="${p.user_id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
     document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
     document.querySelectorAll("[data-reject]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "rejected" }).eq("user_id", b.dataset.reject).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
+    el("taskApprovalsList").innerHTML = (pendingTasks || []).map((t) => `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.description || "Sem descrição")} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><div class="row"><button class="btn sm primary" data-approve-task="${t.id}">Aprovar</button><button class="btn sm danger" data-reject-task="${t.id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem actividades pendentes.</p>';
+    document.querySelectorAll("[data-approve-task]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("tasks").update({ approval_status: "approved", approved_by: currentUserId(), approved_at: new Date().toISOString() }).eq("id", b.dataset.approveTask).eq("company_id", profile.company_id); if (error) throw error; await renderApprovals(); await renderTasks(); await renderDashboard(); });
+    document.querySelectorAll("[data-reject-task]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("tasks").update({ approval_status: "rejected", approved_by: currentUserId(), approved_at: new Date().toISOString() }).eq("id", b.dataset.rejectTask).eq("company_id", profile.company_id); if (error) throw error; await renderApprovals(); await renderTasks(); await renderDashboard(); });
     const { data, error } = await supabase.from("task_delete_requests").select("*, tasks(company_id,title)").order("created_at", { ascending: false });
     if (error) throw error;
     const requests = (data || []).filter((r) => r.tasks?.company_id === profile.company_id && r.status === "pending");
@@ -416,45 +460,43 @@
     document.querySelectorAll("[data-del-task]").forEach((b) => b.onclick = async () => { await supabase.from("tasks").delete().eq("id", b.dataset.delTask); await supabase.from("task_delete_requests").update({ status: "approved" }).eq("id", b.dataset.request); await renderApprovals(); });
   }
 
+  function reportLine(row) {
+    return `<tr><td>${html(row.date)}</td><td>${html(row.client)}</td><td>${html(row.service)}</td><td>${html(row.period)}</td><td>${html(row.status)}</td><td class="num">${money(row.amount)}</td></tr>`;
+  }
+
   async function renderReports() {
     const from = el("repFrom").value || ymd(new Date()); const to = el("repTo").value || from; el("repFrom").value = from; el("repTo").value = to;
     const start = new Date(`${from}T00:00:00`); const end = new Date(`${to}T23:59:59`);
     const { reservations: rows, members, passes, tasks } = await getOperationalData(start, end);
-    const reservationTotal = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
-    const passTotal = passes.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
-    const activeMembers = members.filter((m) => m.status === "active");
-    const memberTotal = activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0);
-    const capacityDays = Math.max(1, operationalResources().length * dateRangeDays(start, end));
-    const occupation = Math.round((new Set(rows.filter(isActiveReservation).map((r) => `${r.resource_id}-${ymd(new Date(r.start_at))}`)).size / capacityDays) * 100);
-    message("reportsMsg", `${rows.length} reserva(s), ocupação ${occupation}%, receitas ${money(reservationTotal + passTotal + memberTotal)}.`);
+    const categories = new Map([
+      ["A. Reservas de Estúdio Verde", []],
+      ["B. Reservas de Estúdio Azul", []],
+      ["C. Reservas de Sala de Reuniões", []],
+      ["D. Reservas de Palco / Espaço para Actividades", []],
+      ["E. Cowork — membros", []],
+      ["F. Cowork — daypasses", []],
+      ["H. Outras receitas", []]
+    ]);
+    rows.forEach((r) => categories.get(resourceCategoryName(r.resource_id)).push({ date: fmt(r.start_at), client: r.client_name, service: resourceName(r.resource_id), period: `${fmt(r.start_at)} → ${fmt(r.end_at)}`, status: r.status, amount: Number(r.total_price || 0) }));
+    members.filter((m) => memberComputedStatus(m) !== "cancelled").forEach((m) => categories.get("E. Cowork — membros").push({ date: m.start_date || "—", client: m.name, service: `Plano ${m.plan} / ${m.payment_type || "mensal"}`, period: `${m.start_date || "—"} → ${m.end_date || "—"}`, status: memberComputedStatus(m), amount: Number(m.amount_paid || 0) }));
+    passes.forEach((p) => categories.get("F. Cowork — daypasses").push({ date: p.date, client: p.client_name, service: "Daypass cowork", period: p.date, status: "pago", amount: Number(p.amount_paid || 0) }));
+    const allLines = [...categories.values()].flat();
+    const total = allLines.reduce((a, r) => a + r.amount, 0);
+    const reportNo = `R-${from.replaceAll("-", "")}-${to.replaceAll("-", "")}-${Date.now().toString().slice(-5)}`;
+    message("reportsMsg", `${allLines.length} linha(s), total ${money(total)}. Use imprimir para guardar em PDF.`);
     el("reportsList").innerHTML = `
-      <div class="grid cols4">
-        <div class="metric-card"><span>Ocupação</span><strong>${occupation}%</strong></div>
-        <div class="metric-card"><span>Reservas</span><strong>${rows.length}</strong></div>
-        <div class="metric-card"><span>Cowork</span><strong>${activeMembers.length}</strong></div>
-        <div class="metric-card"><span>Receitas</span><strong>${money(reservationTotal + passTotal + memberTotal)}</strong></div>
+      <div class="row report-actions no-print">
+        <button class="btn sm primary" data-print-report>Imprimir / Guardar PDF</button>
+        <button class="btn sm" data-csv="general">CSV secundário</button>
       </div>
-      <div class="row report-actions">
-        <button class="btn sm primary" data-csv="general">Exportar Relatório Geral</button>
-      </div>
-      ${rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem dados no período.</p>'}
-    `;
-    document.querySelectorAll("[data-csv]").forEach((b) => b.onclick = () => {
-      const kind = b.dataset.csv;
-      if (kind !== "general") return;
-      const spaceStatus = buildSpaceStatus(rows);
-      downloadCsv(`relatorio-geral-${from}-${to}.csv`, [
-        ["secao", "tipo", "nome_cliente_titulo", "espaco", "inicio_data", "fim_estado", "status", "valor", "detalhes"],
-        ...rows.map((r) => ["reservas", "reserva", r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price, ""]),
-        ...operationalResources().map((resource) => ["ocupacao_por_espaco", resource.type, resource.name, resource.name, from, to, spaceStatus.find((x) => x.resource.id === resource.id)?.current ? "ocupado" : "livre", rows.filter((x) => x.resource_id === resource.id).length, "reservas_no_periodo"]),
-        ...members.map((m) => ["cowork_members", "mensalista", m.name, "Cowork", m.start_date || "", m.end_date || "", m.status, m.amount_paid, m.plan]),
-        ...passes.map((p) => ["daypasses", "daypass", p.client_name, "Cowork", p.date, p.date, "pago", p.amount_paid, ""]),
-        ...rows.map((r) => ["receitas", "reserva", r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price, "receita de reserva"]),
-        ...passes.map((p) => ["receitas", "daypass", p.client_name, "Cowork", p.date, p.date, "pago", p.amount_paid, "receita de daypass"]),
-        ...activeMembers.map((m) => ["receitas", "cowork_member", m.name, "Cowork", m.start_date || "", m.end_date || "", m.status, m.amount_paid, "receita de mensalista"]),
-        ...tasks.map((t) => ["tarefas_actividades", "actividade", t.title, "", t.created_at, t.due_date || "", t.status, "", `${t.priority}${t.description ? ` - ${t.description}` : ""}`])
-      ]);
-    });
+      <article class="report-document" id="visualReport">
+        <header class="report-header"><div><div class="logo report-logo">DC</div><h2>${html(company?.name || "Empresa")}</h2><p>Relatório financeiro tipo recibo/extracto</p></div><div class="report-meta"><strong>N.º ${reportNo}</strong><span>Emitido em ${fmt(new Date())}</span><span>Período: ${from} a ${to}</span></div></header>
+        <section class="report-summary grid cols4"><div><span>Total geral</span><strong>${money(total)}</strong></div><div><span>Serviços</span><strong>${allLines.length}</strong></div><div><span>Reservas</span><strong>${rows.length}</strong></div><div><span>Cowork</span><strong>${members.length + passes.length}</strong></div></section>
+        ${[...categories.entries()].map(([name, lines]) => { const subtotal = lines.reduce((a, r) => a + r.amount, 0); return `<section class="report-section"><h3>${html(name)} <span>${money(subtotal)}</span></h3><table><thead><tr><th>Data</th><th>Cliente/Membro</th><th>Serviço</th><th>Período/Horário</th><th>Estado</th><th>Valor</th></tr></thead><tbody>${lines.map(reportLine).join("") || '<tr><td colspan="6">Sem movimentos nesta categoria.</td></tr>'}</tbody><tfoot><tr><td colspan="5">Subtotal (${lines.length} serviço(s))</td><td class="num">${money(subtotal)}</td></tr></tfoot></table></section>`; }).join("")}
+        <footer class="report-footer"><strong>Total geral: ${money(total)}</strong><p>Observações: relatório gerado automaticamente pelo ControleDC. Confirme pagamentos e estados antes da emissão fiscal definitiva.</p></footer>
+      </article>`;
+    document.querySelector("[data-print-report]").onclick = () => window.print();
+    document.querySelectorAll("[data-csv]").forEach((b) => b.onclick = () => downloadCsv(`relatorio-secundario-${from}-${to}.csv`, [["categoria", "data", "cliente", "servico", "periodo", "estado", "valor"], ...[...categories.entries()].flatMap(([cat, lines]) => lines.map((r) => [cat, r.date, r.client, r.service, r.period, r.status, r.amount]))]));
   }
 
   async function showScreen(name) {
@@ -478,7 +520,7 @@
     document.querySelectorAll(".m-item").forEach((b) => b.onclick = () => showScreen(b.dataset.go));
     el("btnOpenReservation").onclick = () => openReservation(); el("btnCloseReservation").onclick = () => closeModal("reservationModal"); el("btnSaveReservation").onclick = () => saveReservation().catch((e) => message("reservationMsg", e.message)); el("btnDeleteReservation").onclick = () => deleteReservation().catch((e) => message("reservationMsg", e.message));
     el("resDay").onchange = renderReservations; el("resFilterResource").onchange = renderReservations;
-    el("btnAddMember").onclick = () => openMember(); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));
+    el("btnAddMember").onclick = () => openMember(); el("btnAddPayment").onclick = () => addCoworkPayment().catch((e) => message("memberMsg", e.message)); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));
     el("btnCreateTask").onclick = () => openTask(); el("btnCloseTask").onclick = () => closeModal("taskModal"); el("btnSaveTask").onclick = () => saveTask().catch((e) => message("taskMsg", e.message)); el("btnDeleteTask").onclick = () => requestTaskRemoval().catch((e) => message("taskMsg", e.message)); el("taskStatusFilter").onchange = renderTasks;
     el("agendaDay").onchange = renderAgendaView; el("agendaMode").onchange = renderAgendaView;
     el("btnRunReports").onclick = renderReports;

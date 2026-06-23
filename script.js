@@ -157,11 +157,15 @@
     fillPeopleSelect();
   }
 
+  function operationalResources() {
+    return resources.filter((r) => r.active !== false);
+  }
+
   function fillResourceSelects() {
     ["resFilterResource", "reservationResource"].forEach((id) => {
       const node = el(id); if (!node) return;
       node.innerHTML = id === "resFilterResource" ? '<option value="all">Todos</option>' : "";
-      resources.filter((r) => r.type !== "cowork").forEach((r) => node.insertAdjacentHTML("beforeend", `<option value="${r.id}">${html(r.name)}</option>`));
+      operationalResources().forEach((r) => node.insertAdjacentHTML("beforeend", `<option value="${r.id}">${html(r.name)}</option>`));
     });
   }
 
@@ -187,7 +191,7 @@
   }
 
   function buildSpaceStatus(rows, now = new Date()) {
-    return resources.filter((r) => r.type !== "cowork").map((resource) => {
+    return operationalResources().map((resource) => {
       const related = rows.filter((r) => r.resource_id === resource.id && isActiveReservation(r));
       const current = related.find((r) => new Date(r.start_at) <= now && new Date(r.end_at) > now);
       const next = related.find((r) => new Date(r.start_at) > now);
@@ -265,7 +269,7 @@
     if (!id) {
       el("reservationClient").value = ""; el("reservationStatus").value = "confirmed"; el("reservationPrice").value = 0;
       const day = el("resDay").value || ymd(new Date()); el("reservationStart").value = `${day}T09:00`; el("reservationEnd").value = `${day}T10:00`;
-      if (resources[0]) el("reservationResource").value = resources.filter((r) => r.type !== "cowork")[0]?.id || "";
+      if (operationalResources()[0]) el("reservationResource").value = operationalResources()[0]?.id || "";
     } else {
       const { data, error } = await supabase.from("reservations").select("*").eq("id", id).single();
       if (error) throw error;
@@ -293,7 +297,7 @@
   }
 
   function renderAgenda(rows) {
-    const grouped = resources.filter((r) => r.type !== "cowork").map((resource) => ({
+    const grouped = operationalResources().map((resource) => ({
       resource,
       rows: rows.filter((r) => r.resource_id === resource.id).sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
     }));
@@ -415,12 +419,12 @@
   async function renderReports() {
     const from = el("repFrom").value || ymd(new Date()); const to = el("repTo").value || from; el("repFrom").value = from; el("repTo").value = to;
     const start = new Date(`${from}T00:00:00`); const end = new Date(`${to}T23:59:59`);
-    const { reservations: rows, members, passes } = await getOperationalData(start, end);
+    const { reservations: rows, members, passes, tasks } = await getOperationalData(start, end);
     const reservationTotal = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
     const passTotal = passes.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
     const activeMembers = members.filter((m) => m.status === "active");
     const memberTotal = activeMembers.reduce((a, m) => a + Number(m.amount_paid || 0), 0);
-    const capacityDays = Math.max(1, resources.filter((r) => r.type !== "cowork").length * dateRangeDays(start, end));
+    const capacityDays = Math.max(1, operationalResources().length * dateRangeDays(start, end));
     const occupation = Math.round((new Set(rows.filter(isActiveReservation).map((r) => `${r.resource_id}-${ymd(new Date(r.start_at))}`)).size / capacityDays) * 100);
     message("reportsMsg", `${rows.length} reserva(s), ocupação ${occupation}%, receitas ${money(reservationTotal + passTotal + memberTotal)}.`);
     el("reportsList").innerHTML = `
@@ -431,19 +435,25 @@
         <div class="metric-card"><span>Receitas</span><strong>${money(reservationTotal + passTotal + memberTotal)}</strong></div>
       </div>
       <div class="row report-actions">
-        <button class="btn sm" data-csv="occupation">CSV ocupação</button>
-        <button class="btn sm" data-csv="reservations">CSV reservas</button>
-        <button class="btn sm" data-csv="cowork">CSV cowork</button>
-        <button class="btn sm" data-csv="revenue">CSV receitas</button>
+        <button class="btn sm primary" data-csv="general">Exportar Relatório Geral</button>
       </div>
       ${rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem dados no período.</p>'}
     `;
     document.querySelectorAll("[data-csv]").forEach((b) => b.onclick = () => {
       const kind = b.dataset.csv;
-      if (kind === "occupation") downloadCsv(`ocupacao-${from}-${to}.csv`, [["espaco", "reservas", "ocupado_agora"], ...resources.filter((r) => r.type !== "cowork").map((resource) => [resource.name, rows.filter((x) => x.resource_id === resource.id).length, buildSpaceStatus(rows).find((x) => x.resource.id === resource.id)?.current ? "sim" : "nao"])]);
-      if (kind === "reservations") downloadCsv(`reservas-${from}-${to}.csv`, [["cliente", "espaco", "inicio", "fim", "estado", "valor"], ...rows.map((r) => [r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price])]);
-      if (kind === "cowork") downloadCsv(`cowork-${from}-${to}.csv`, [["tipo", "cliente", "estado_data", "valor"], ...members.map((m) => ["mensalista", m.name, m.status, m.amount_paid]), ...passes.map((p) => ["daypass", p.client_name, p.date, p.amount_paid])]);
-      if (kind === "revenue") downloadCsv(`receitas-${from}-${to}.csv`, [["origem", "descricao", "data", "valor"], ...rows.map((r) => ["reserva", `${resourceName(r.resource_id)} - ${r.client_name}`, r.start_at, r.total_price]), ...passes.map((p) => ["daypass", p.client_name, p.date, p.amount_paid]), ...activeMembers.map((m) => ["cowork", m.name, m.end_date || "activo", m.amount_paid])]);
+      if (kind !== "general") return;
+      const spaceStatus = buildSpaceStatus(rows);
+      downloadCsv(`relatorio-geral-${from}-${to}.csv`, [
+        ["secao", "tipo", "nome_cliente_titulo", "espaco", "inicio_data", "fim_estado", "status", "valor", "detalhes"],
+        ...rows.map((r) => ["reservas", "reserva", r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price, ""]),
+        ...operationalResources().map((resource) => ["ocupacao_por_espaco", resource.type, resource.name, resource.name, from, to, spaceStatus.find((x) => x.resource.id === resource.id)?.current ? "ocupado" : "livre", rows.filter((x) => x.resource_id === resource.id).length, "reservas_no_periodo"]),
+        ...members.map((m) => ["cowork_members", "mensalista", m.name, "Cowork", m.start_date || "", m.end_date || "", m.status, m.amount_paid, m.plan]),
+        ...passes.map((p) => ["daypasses", "daypass", p.client_name, "Cowork", p.date, p.date, "pago", p.amount_paid, ""]),
+        ...rows.map((r) => ["receitas", "reserva", r.client_name, resourceName(r.resource_id), r.start_at, r.end_at, r.status, r.total_price, "receita de reserva"]),
+        ...passes.map((p) => ["receitas", "daypass", p.client_name, "Cowork", p.date, p.date, "pago", p.amount_paid, "receita de daypass"]),
+        ...activeMembers.map((m) => ["receitas", "cowork_member", m.name, "Cowork", m.start_date || "", m.end_date || "", m.status, m.amount_paid, "receita de mensalista"]),
+        ...tasks.map((t) => ["tarefas_actividades", "actividade", t.title, "", t.created_at, t.due_date || "", t.status, "", `${t.priority}${t.description ? ` - ${t.description}` : ""}`])
+      ]);
     });
   }
 

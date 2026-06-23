@@ -121,11 +121,20 @@ create table public.task_delete_requests (
 
 insert into public.companies (name, code) values ('XHUB', 'XHUB-26');
 insert into public.resources (company_id, name, type, code, active)
-select id, 'Sala de Reuniões', 'room', 'r_meet', true from public.companies where code = 'XHUB-26'
-union all
-select id, 'Estúdio', 'studio', 'r_studio', true from public.companies where code = 'XHUB-26'
-union all
-select id, 'Cowork', 'cowork', 'r_cowork', true from public.companies where code = 'XHUB-26';
+select c.id, seed.name, seed.type, seed.code, true
+from public.companies c
+cross join (values
+  ('Sala de Reuniões', 'room', 'r_meet'),
+  ('Estúdio de Música', 'studio', 'r_music_studio'),
+  ('Estúdio de Fotografia', 'studio', 'r_photo_studio'),
+  ('Cowork', 'cowork', 'r_cowork'),
+  ('Palco / Espaço para Espectáculos e Actividades', 'other', 'r_stage')
+) as seed(name, type, code)
+where c.code = 'XHUB-26'
+on conflict (company_id, code) do update set
+  name = excluded.name,
+  type = excluded.type,
+  active = excluded.active;
 
 create function public.set_updated_at() returns trigger language plpgsql as $$
 begin

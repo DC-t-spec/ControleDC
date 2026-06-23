@@ -7,6 +7,7 @@ create extension if not exists pgcrypto;
 drop table if exists public.task_delete_requests cascade;
 drop table if exists public.task_updates cascade;
 drop table if exists public.tasks cascade;
+drop table if exists public.cowork_payments cascade;
 drop table if exists public.cowork_daypasses cascade;
 drop table if exists public.cowork_members cascade;
 drop table if exists public.reservations cascade;
@@ -47,7 +48,7 @@ create table public.resources (
   id uuid primary key default gen_random_uuid(),
   company_id uuid not null references public.companies(id) on delete cascade,
   name text not null,
-  type text not null check (type in ('room', 'studio', 'cowork', 'other')),
+  type text not null check (type in ('room', 'studio', 'stage', 'other')),
   code text not null,
   active boolean not null default true,
   created_at timestamptz not null default now(),
@@ -71,11 +72,27 @@ create table public.cowork_members (
   id uuid primary key default gen_random_uuid(),
   company_id uuid not null references public.companies(id) on delete cascade,
   name text not null,
-  plan text not null default 'monthly',
+  plan text not null default 'monthly' check (plan in ('daily', 'monthly', 'quarterly', 'semiannual', 'annual')),
+  payment_type text not null default 'monthly' check (payment_type in ('single', 'monthly', 'installments')),
   start_date date,
   end_date date,
+  total_value numeric(12,2) not null default 0,
   amount_paid numeric(12,2) not null default 0,
-  status text not null default 'active' check (status in ('active', 'inactive', 'ended')),
+  next_payment_date date,
+  status text not null default 'active' check (status in ('active', 'pending', 'overdue', 'expired', 'cancelled')),
+  created_at timestamptz not null default now()
+);
+
+create table public.cowork_payments (
+  id uuid primary key default gen_random_uuid(),
+  cowork_member_id uuid not null references public.cowork_members(id) on delete cascade,
+  company_id uuid not null references public.companies(id) on delete cascade,
+  payment_date date not null default current_date,
+  amount numeric(12,2) not null check (amount > 0),
+  payment_method text,
+  reference text,
+  notes text,
+  created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -98,6 +115,9 @@ create table public.tasks (
   status text not null default 'todo' check (status in ('todo', 'doing', 'blocked', 'done', 'canceled')),
   responsible_id uuid references auth.users(id) on delete set null,
   created_by uuid references auth.users(id) on delete set null,
+  approval_status text not null default 'pending' check (approval_status in ('pending', 'approved', 'rejected')),
+  approved_by uuid references auth.users(id) on delete set null,
+  approved_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -124,11 +144,10 @@ insert into public.resources (company_id, name, type, code, active)
 select c.id, seed.name, seed.type, seed.code, true
 from public.companies c
 cross join (values
-  ('Sala de Reuniões', 'room', 'r_meet'),
-  ('Estúdio de Música', 'studio', 'r_music_studio'),
-  ('Estúdio de Fotografia', 'studio', 'r_photo_studio'),
-  ('Cowork', 'cowork', 'r_cowork'),
-  ('Palco / Espaço para Espectáculos e Actividades', 'other', 'r_stage')
+  ('Estúdio Verde', 'studio', 'r_green_studio'),
+  ('Estúdio Azul', 'studio', 'r_blue_studio'),
+  ('Sala de Reuniões', 'room', 'r_meeting_room'),
+  ('Palco / Espaço para Actividades', 'stage', 'r_stage')
 ) as seed(name, type, code)
 where c.code = 'XHUB-26'
 on conflict (company_id, code) do update set
@@ -184,6 +203,25 @@ create function public.is_company_admin(target_company uuid) returns boolean lan
   )
 $$;
 
+create function public.prevent_task_approval_escalation() returns trigger language plpgsql set search_path = public as $$
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+  if public.is_company_admin(old.company_id) then
+    return new;
+  end if;
+  if new.approval_status is distinct from old.approval_status
+    or new.approved_by is distinct from old.approved_by
+    or new.approved_at is distinct from old.approved_at then
+    raise exception 'Apenas administradores podem aprovar ou rejeitar actividades.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger tasks_prevent_approval_escalation before update on public.tasks for each row execute function public.prevent_task_approval_escalation();
+
 create function public.handle_new_auth_user() returns trigger language plpgsql security definer set search_path = public as $$
 declare
   metadata_company_id uuid;
@@ -219,6 +257,7 @@ alter table public.profiles enable row level security;
 alter table public.resources enable row level security;
 alter table public.reservations enable row level security;
 alter table public.cowork_members enable row level security;
+alter table public.cowork_payments enable row level security;
 alter table public.cowork_daypasses enable row level security;
 alter table public.tasks enable row level security;
 alter table public.task_updates enable row level security;
@@ -240,12 +279,16 @@ create policy "reservations company write" on public.reservations for all using 
 create policy "cowork members company read" on public.cowork_members for select using (company_id = public.my_company_id());
 create policy "cowork members company write" on public.cowork_members for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
 
+create policy "cowork payments company read" on public.cowork_payments for select using (company_id = public.my_company_id());
+create policy "cowork payments company write" on public.cowork_payments for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
+
 create policy "cowork daypasses company read" on public.cowork_daypasses for select using (company_id = public.my_company_id());
 create policy "cowork daypasses company write" on public.cowork_daypasses for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
 
 create policy "tasks company read" on public.tasks for select using (company_id = public.my_company_id() and (public.is_company_admin(company_id) or responsible_id = auth.uid() or created_by = auth.uid()));
-create policy "tasks company insert" on public.tasks for insert with check (company_id = public.my_company_id() and created_by = auth.uid());
-create policy "tasks company update" on public.tasks for update using (company_id = public.my_company_id() and (public.is_company_admin(company_id) or responsible_id = auth.uid() or created_by = auth.uid())) with check (company_id = public.my_company_id());
+create policy "tasks company insert" on public.tasks for insert with check (company_id = public.my_company_id() and created_by = auth.uid() and ((public.is_company_admin(company_id) and approval_status = 'approved') or (not public.is_company_admin(company_id) and approval_status = 'pending')));
+create policy "tasks admin approval update" on public.tasks for update using (public.is_company_admin(company_id)) with check (public.is_company_admin(company_id));
+create policy "tasks owner operational update" on public.tasks for update using (company_id = public.my_company_id() and (responsible_id = auth.uid() or created_by = auth.uid()) and approval_status <> 'rejected') with check (company_id = public.my_company_id() and approval_status = approval_status);
 create policy "tasks admin delete" on public.tasks for delete using (public.is_company_admin(company_id));
 
 create policy "task updates company read" on public.task_updates for select using (exists (select 1 from public.tasks t where t.id = task_id and t.company_id = public.my_company_id()));

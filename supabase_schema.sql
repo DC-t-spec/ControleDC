@@ -38,7 +38,7 @@ create table public.profiles (
   user_id uuid not null unique references auth.users(id) on delete cascade,
   company_id uuid references public.companies(id) on delete cascade,
   name text not null,
-  role text not null default 'user' check (role in ('admin', 'user')),
+  role text not null default 'user' check (role in ('admin', 'manager', 'user')),
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected', 'disabled')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -196,11 +196,19 @@ create function public.my_company_id() returns uuid language sql stable security
   select company_id from public.profiles where user_id = auth.uid() and status = 'approved' limit 1
 $$;
 
-create function public.is_company_admin(target_company uuid) returns boolean language sql stable security definer set search_path = public as $$
+create function public.has_company_role(target_company uuid, allowed_roles text[]) returns boolean language sql stable security definer set search_path = public as $$
   select exists (
     select 1 from public.profiles
-    where user_id = auth.uid() and company_id = target_company and role = 'admin' and status = 'approved'
+    where user_id = auth.uid() and company_id = target_company and role = any(allowed_roles) and status = 'approved'
   )
+$$;
+
+create function public.is_company_admin(target_company uuid) returns boolean language sql stable security definer set search_path = public as $$
+  select public.has_company_role(target_company, array['admin'])
+$$;
+
+create function public.is_company_manager_or_admin(target_company uuid) returns boolean language sql stable security definer set search_path = public as $$
+  select public.has_company_role(target_company, array['admin','manager'])
 $$;
 
 create function public.prevent_task_approval_escalation() returns trigger language plpgsql set search_path = public as $$
@@ -285,21 +293,23 @@ create policy "resources company read" on public.resources for select using (com
 create policy "resources admin write" on public.resources for all using (public.is_company_admin(company_id)) with check (public.is_company_admin(company_id));
 
 create policy "reservations company read" on public.reservations for select using (company_id = public.my_company_id());
-create policy "reservations company write" on public.reservations for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
+create policy "reservations admin manager insert" on public.reservations for insert with check (public.is_company_manager_or_admin(company_id) and exists (select 1 from public.resources r where r.id = resource_id and r.company_id = reservations.company_id and r.active = true));
+create policy "reservations admin manager update" on public.reservations for update using (public.is_company_manager_or_admin(company_id)) with check (public.is_company_manager_or_admin(company_id) and exists (select 1 from public.resources r where r.id = resource_id and r.company_id = reservations.company_id and r.active = true));
+create policy "reservations admin delete" on public.reservations for delete using (public.is_company_admin(company_id));
 
-create policy "cowork members company read" on public.cowork_members for select using (company_id = public.my_company_id());
-create policy "cowork members company write" on public.cowork_members for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
+create policy "cowork members admin manager read" on public.cowork_members for select using (public.is_company_manager_or_admin(company_id));
+create policy "cowork members admin manager write" on public.cowork_members for all using (public.is_company_manager_or_admin(company_id)) with check (public.is_company_manager_or_admin(company_id));
 
-create policy "cowork payments company read" on public.cowork_payments for select using (company_id = public.my_company_id());
-create policy "cowork payments company write" on public.cowork_payments for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
+create policy "cowork payments admin manager read" on public.cowork_payments for select using (public.is_company_manager_or_admin(company_id));
+create policy "cowork payments admin manager write" on public.cowork_payments for all using (public.is_company_manager_or_admin(company_id)) with check (public.is_company_manager_or_admin(company_id));
 
-create policy "cowork daypasses company read" on public.cowork_daypasses for select using (company_id = public.my_company_id());
-create policy "cowork daypasses company write" on public.cowork_daypasses for all using (company_id = public.my_company_id()) with check (company_id = public.my_company_id());
+create policy "cowork daypasses admin manager read" on public.cowork_daypasses for select using (public.is_company_manager_or_admin(company_id));
+create policy "cowork daypasses admin manager write" on public.cowork_daypasses for all using (public.is_company_manager_or_admin(company_id)) with check (public.is_company_manager_or_admin(company_id));
 
-create policy "tasks company read" on public.tasks for select using (company_id = public.my_company_id() and (public.is_company_admin(company_id) or responsible_id = auth.uid() or created_by = auth.uid()));
-create policy "tasks company insert" on public.tasks for insert with check (company_id = public.my_company_id() and created_by = auth.uid() and ((public.is_company_admin(company_id) and approval_status = 'approved') or (not public.is_company_admin(company_id) and approval_status = 'pending')));
+create policy "tasks role based read" on public.tasks for select using (company_id = public.my_company_id() and (public.is_company_manager_or_admin(company_id) or responsible_id = auth.uid() or created_by = auth.uid()));
+create policy "tasks role based insert" on public.tasks for insert with check (company_id = public.my_company_id() and created_by = auth.uid() and ((public.is_company_admin(company_id) and approval_status = 'approved') or (not public.is_company_admin(company_id) and approval_status = 'pending')));
 create policy "tasks admin approval update" on public.tasks for update using (public.is_company_admin(company_id)) with check (public.is_company_admin(company_id));
-create policy "tasks owner operational update" on public.tasks for update using (company_id = public.my_company_id() and (responsible_id = auth.uid() or created_by = auth.uid()) and approval_status <> 'rejected') with check (company_id = public.my_company_id() and approval_status = approval_status);
+create policy "tasks owner manager operational update" on public.tasks for update using (company_id = public.my_company_id() and (public.is_company_manager_or_admin(company_id) or responsible_id = auth.uid() or created_by = auth.uid()) and approval_status <> 'rejected') with check (company_id = public.my_company_id());
 create policy "tasks admin delete" on public.tasks for delete using (public.is_company_admin(company_id));
 
 create policy "task updates company read" on public.task_updates for select using (exists (select 1 from public.tasks t where t.id = task_id and t.company_id = public.my_company_id()));

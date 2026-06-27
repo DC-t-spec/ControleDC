@@ -23,6 +23,9 @@
   const dateRangeDays = (from, to) => Math.max(1, Math.ceil((to - from) / 86400000));
   const html = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   const isAdmin = () => profile?.role === "admin";
+  const isManager = () => profile?.role === "manager";
+  const canCreateReservations = () => isAdmin() || isManager();
+  const canSeeOperationalDashboard = () => isAdmin() || isManager();
   const currentUserId = () => session?.user?.id || null;
 
   function message(id, text) { const node = el(id); if (node) node.textContent = text; }
@@ -231,13 +234,13 @@
     let q = supabase.from("tasks").select("*").eq("company_id", profile.company_id);
     if (excludeRejected) q = q.neq("approval_status", "rejected");
     if (pendingOnly) q = q.eq("approval_status", "pending");
-    if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
+    if (!all && !isAdmin() && !isManager()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
     q = orderCreatedDesc ? q.order("created_at", { ascending: false }) : q.order("due_date");
     let result = await q;
     if (result.error && isMissingSchemaError(result.error) && (excludeRejected || pendingOnly)) {
       schemaSupport.taskApprovals = false;
       q = supabase.from("tasks").select("*").eq("company_id", profile.company_id);
-      if (!all && !isAdmin()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
+      if (!all && !isAdmin() && !isManager()) q = q.or(`responsible_id.eq.${currentUserId()},created_by.eq.${currentUserId()}`);
       result = orderCreatedDesc ? await q.order("created_at", { ascending: false }) : await q.order("due_date");
     } else if (!result.error) {
       schemaSupport.taskApprovals = true;
@@ -246,6 +249,14 @@
   }
 
   async function getOperationalData(from, to) {
+    if (!canSeeOperationalDashboard()) {
+      const [{ data: reservations, error: er }, { data: tasks, error: et }] = await Promise.all([
+        supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
+        queryTasks({ excludeRejected: true })
+      ]);
+      if (er) throw er; if (et) throw et;
+      return { reservations: reservations || [], members: [], passes: [], tasks: tasks || [] };
+    }
     const [{ data: reservations, error: er }, { data: members, error: em }, { data: passes, error: ep }, { data: tasks, error: et }] = await Promise.all([
       supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
       queryCoworkMembers(),
@@ -269,22 +280,21 @@
     const daypassesToday = passes.filter((p) => p.date === ymd(today));
     const reservationRevenue = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const coworkPaymentsMonth = members.flatMap((m) => m.cowork_payments || []).filter((p) => new Date(p.payment_date) >= monthStart);
+    const coworkPaymentsMonth = canSeeOperationalDashboard() ? members.flatMap((m) => m.cowork_payments || []).filter((p) => new Date(p.payment_date) >= monthStart) : [];
     const coworkRevenue = coworkPaymentsMonth.reduce((a, p) => a + Number(p.amount || 0), 0) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
     const pendingTasks = tasks.filter((t) => t.approval_status === "pending").length;
 
     el("dashMetrics").innerHTML = [
-      ["Cowork activo", activeMembers.length, "ok"],
-      ["Cowork em atraso", overdueMembers.length, overdueMembers.length ? "warn" : "ok"],
+      ...(canSeeOperationalDashboard() ? [["Cowork activo", activeMembers.length, "ok"], ["Cowork em atraso", overdueMembers.length, overdueMembers.length ? "warn" : "ok"]] : []),
       ["Reservas hoje", rows.length, "ok"],
-      ["Pagamentos mês", money(coworkRevenue), "ok"],
+      ...(canSeeOperationalDashboard() ? [["Pagamentos mês", money(coworkRevenue), "ok"]] : []),
       ["Actividades pendentes", pendingTasks, pendingTasks ? "warn" : "ok"]
     ].map(([label, value, kind]) => `<div class="metric-card"><span>${label}</span><strong>${html(value)}</strong>${statusBadge(kind === "warn" ? "Atenção" : "Operacional", kind)}</div>`).join("");
 
     message("todayMeta", `${rows.length} reserva(s) • ${money(reservationRevenue)}`);
     el("todayList").innerHTML = rows.map((r) => `<div class="item"><div><div class="item-title">${html(r.client_name)} ${statusBadge(r.status, r.status === "cancelled" ? "bad" : "ok")}</div><div class="item-meta">${html(resourceName(r.resource_id))} • ${fmt(r.start_at)} → ${fmt(r.end_at)} • ${money(r.total_price)}</div></div></div>`).join("") || '<p class="muted">Sem reservas hoje.</p>';
-    message("cwOcc", `${activeMembers.length} activo(s), ${overdueMembers.length} em atraso, ${expiredMembers.length} expirado(s), ${daypassesToday.length} daypass(es) hoje`);
-    message("cwRevenue", `Pagamentos de cowork recebidos no mês: ${money(coworkRevenue)}`);
+    message("cwOcc", canSeeOperationalDashboard() ? `${activeMembers.length} activo(s), ${overdueMembers.length} em atraso, ${expiredMembers.length} expirado(s), ${daypassesToday.length} daypass(es) hoje` : "Disponível apenas para admin/gestor.");
+    message("cwRevenue", canSeeOperationalDashboard() ? `Pagamentos de cowork recebidos no mês: ${money(coworkRevenue)}` : "Resumo financeiro oculto para utilizadores normais.");
 
     const weekReservations = await queryReservations(start, weekEnd);
     el("spaceStatusList").innerHTML = buildSpaceStatus(weekReservations).map(({ resource, current, next }) => {
@@ -295,6 +305,7 @@
   }
 
   async function renderReservations() {
+    el("btnOpenReservation")?.classList.toggle("hidden", !canCreateReservations());
     const day = el("resDay").value || ymd(new Date()); el("resDay").value = day;
     const start = new Date(`${day}T00:00:00`); const end = new Date(`${day}T23:59:59`);
     let rows = await queryReservations(start, end);
@@ -306,6 +317,7 @@
   }
 
   async function openReservation(id = "") {
+    if (!canCreateReservations()) throw new Error("Sem permissão para criar ou editar reservas.");
     el("reservationId").value = id;
     message("reservationMsg", "—");
     if (!id) {
@@ -323,15 +335,19 @@
   }
 
   async function saveReservation() {
+    if (!canCreateReservations()) throw new Error("Sem permissão para guardar reservas.");
     const id = el("reservationId").value;
     const payload = { company_id: profile.company_id, resource_id: el("reservationResource").value, client_name: el("reservationClient").value.trim(), start_at: new Date(el("reservationStart").value).toISOString(), end_at: new Date(el("reservationEnd").value).toISOString(), status: el("reservationStatus").value, total_price: Number(el("reservationPrice").value || 0) };
     if (!payload.resource_id || !payload.client_name) throw new Error("Preencha recurso e cliente.");
+    if (!resources.some((r) => r.id === payload.resource_id && r.company_id === profile.company_id && r.active !== false)) throw new Error("Recurso inválido ou inactivo.");
+    if (new Date(payload.end_at) <= new Date(payload.start_at)) throw new Error("A data/hora de fim deve ser posterior ao início.");
     const result = id ? await supabase.from("reservations").update(payload).eq("id", id) : await supabase.from("reservations").insert(payload);
     if (result.error) throw result.error;
     closeModal("reservationModal"); await renderReservations(); await renderDashboard();
   }
 
   async function deleteReservation() {
+    if (!isAdmin()) throw new Error("Apenas administradores podem apagar reservas.");
     const id = el("reservationId").value; if (!id) return;
     const { error } = await supabase.from("reservations").delete().eq("id", id);
     if (error) throw error;
@@ -355,6 +371,7 @@
   }
 
   async function renderCowork() {
+    if (!canSeeOperationalDashboard()) { message("coworkMsg", "Área reservada a administradores e gestores."); return; }
     const [{ data: members, error: e1 }, { data: passes, error: e2 }] = await Promise.all([
       queryCoworkMembers(),
       supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false })
@@ -433,8 +450,8 @@
   }
 
   async function renderTeam() {
-    if (!isAdmin()) { message("teamMsg", "Área reservada a administradores."); el("teamList").innerHTML = ""; return; }
-    const rows = await fetchTasks(true);
+    if (!isAdmin() && !isManager()) { message("teamMsg", "Área reservada a administradores e gestores."); el("teamList").innerHTML = ""; return; }
+    const rows = await fetchTasks(isAdmin() || isManager());
     message("teamMsg", `${rows.length} actividade(s) da empresa.`);
     el("teamList").innerHTML = rows.map(taskItem).join("") || '<p class="muted">Sem actividades.</p>';
   }
@@ -481,8 +498,8 @@
     if (taskApprovalError) throw taskApprovalError;
     const taskApprovalRows = schemaSupport.taskApprovals ? (pendingTasks || []) : [];
     message("approvalsMsg", `${pending.length} utilizador(es) e ${taskApprovalRows.length} actividade(s) pendente(s).${schemaSupport.taskApprovals ? "" : " Execute supabase_migration_v2.sql para activar aprovações de actividades."}`);
-    el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><div class="row"><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button><button class="btn sm danger" data-reject="${p.user_id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
-    document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
+    el("approvalsList").innerHTML = pending.map((p) => `<div class="item"><div><div class="item-title">${html(p.name)}</div><div class="item-meta">${p.user_id}</div></div><div class="row"><select data-role-for="${p.user_id}"><option value="user" ${p.role === "user" ? "selected" : ""}>Utilizador</option><option value="manager" ${p.role === "manager" ? "selected" : ""}>Gestor</option><option value="admin" ${p.role === "admin" ? "selected" : ""}>Admin</option></select><button class="btn sm primary" data-approve="${p.user_id}">Aprovar</button><button class="btn sm danger" data-reject="${p.user_id}">Rejeitar</button></div></div>`).join("") || '<p class="muted">Sem pendentes.</p>';
+    document.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "approved", role: document.querySelector(`[data-role-for="${b.dataset.approve}"]`)?.value || "user" }).eq("user_id", b.dataset.approve).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
     document.querySelectorAll("[data-reject]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("profiles").update({ status: "rejected" }).eq("user_id", b.dataset.reject).eq("company_id", profile.company_id); if (error) throw error; await loadBaseData(); await renderApprovals(); });
     el("taskApprovalsList").innerHTML = taskApprovalRows.map((t) => `<div class="item"><div><div class="item-title">${html(t.title)}</div><div class="item-meta">${html(t.description || "Sem descrição")} • ${t.due_date ? fmt(t.due_date) : "sem prazo"}</div></div><div class="row"><button class="btn sm primary" data-approve-task="${t.id}">Aprovar</button><button class="btn sm danger" data-reject-task="${t.id}">Rejeitar</button></div></div>`).join("") || `<p class="muted">${schemaSupport.taskApprovals ? "Sem actividades pendentes." : "Aprovações de actividades ainda não migradas."}</p>`;
     document.querySelectorAll("[data-approve-task]").forEach((b) => b.onclick = async () => { const { error } = await supabase.from("tasks").update({ approval_status: "approved", approved_by: currentUserId(), approved_at: new Date().toISOString() }).eq("id", b.dataset.approveTask).eq("company_id", profile.company_id); if (error) throw error; await renderApprovals(); await renderTasks(); await renderDashboard(); });
@@ -544,7 +561,7 @@
     if (name === "tasks") await renderTasks();
     if (name === "team") await renderTeam();
     if (name === "approvals") await renderApprovals();
-    if (name === "reports") await renderReports();
+    if (name === "reports") { if (!isAdmin()) { message("reportsMsg", "Área reservada a administradores."); return; } await renderReports(); }
   }
 
   function closeMobileMenu() {
@@ -561,12 +578,17 @@
     button?.setAttribute("aria-expanded", String(isOpen));
   }
 
+  function applyRoleVisibility() {
+    const visibility = { dash: true, reservas: canCreateReservations(), cowork: canSeeOperationalDashboard(), agenda: true, tasks: true, team: isAdmin() || isManager(), approvals: isAdmin(), reports: isAdmin() };
+    document.querySelectorAll(".m-item").forEach((b) => { b.hidden = !visibility[b.dataset.go]; });
+  }
+
   function bind() {
-    el("btnLogin").onclick = async () => { try { message("authMsg", "A entrar..."); await login(); await loadBaseData(); hideAuth(); await showScreen("dash"); } catch (e) { showAuth(e.message || String(e)); } };
+    el("btnLogin").onclick = async () => { try { message("authMsg", "A entrar..."); await login(); await loadBaseData(); applyRoleVisibility(); hideAuth(); await showScreen("dash"); } catch (e) { showAuth(e.message || String(e)); } };
     el("btnSignup").onclick = async () => { try { message("authMsg", "A criar conta..."); await signup(); } catch (e) { showAuth(e.message || String(e)); } };
     el("btnLogout").onclick = logout;
     el("btnMobileMenu").onclick = toggleMobileMenu;
-    document.querySelectorAll(".m-item").forEach((b) => b.onclick = async () => { closeMobileMenu(); await showScreen(b.dataset.go); });
+    document.querySelectorAll(".m-item").forEach((b) => b.onclick = async () => { if (b.hidden) return; closeMobileMenu(); await showScreen(b.dataset.go); });
     el("btnOpenReservation").onclick = () => openReservation(); el("btnCloseReservation").onclick = () => closeModal("reservationModal"); el("btnSaveReservation").onclick = () => saveReservation().catch((e) => message("reservationMsg", e.message)); el("btnDeleteReservation").onclick = () => deleteReservation().catch((e) => message("reservationMsg", e.message));
     el("resDay").onchange = renderReservations; el("resFilterResource").onchange = renderReservations;
     el("btnAddMember").onclick = () => openMember(); el("btnAddPayment").onclick = () => addCoworkPayment().catch((e) => message("memberMsg", e.message)); el("btnCloseMember").onclick = () => closeModal("memberModal"); el("btnSaveMember").onclick = () => saveMember().catch((e) => message("memberMsg", e.message)); el("btnAddDaypass").onclick = () => addDaypass().catch((e) => message("coworkMsg", e.message));
@@ -587,6 +609,7 @@
       if (!profile?.company_id) return showAuth("Perfil não encontrado. Contacte o administrador.");
       if (profile.status !== "approved") return showAuth("Conta pendente de aprovação.");
       await loadBaseData();
+      applyRoleVisibility();
       hideAuth();
       await showScreen("dash");
       setInterval(() => { if (!el("scr-dash")?.hidden) renderDashboard(); if (!el("scr-agenda")?.hidden) renderAgendaView(); }, 30000);

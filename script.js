@@ -10,7 +10,7 @@
   let company = null;
   let resources = [];
   let profiles = [];
-  const schemaSupport = { coworkPayments: true, taskApprovals: true };
+  const schemaSupport = { coworkPayments: true, taskApprovals: true, coworkDaypassFinance: true };
 
 
   const el = (id) => document.getElementById(id);
@@ -164,7 +164,12 @@
     return "H. Outras receitas";
   }
 
-  function memberBalance(m) { return Number(m.total_value || 0) - Number(m.amount_paid || 0); }
+  function memberPaidTotal(m) {
+    const payments = Array.isArray(m.cowork_payments) ? m.cowork_payments : [];
+    if (schemaSupport.coworkPayments && payments.length) return payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    return Number(m.amount_paid || 0);
+  }
+  function memberBalance(m) { return Number(m.total_value || 0) - memberPaidTotal(m); }
   function memberComputedStatus(m, now = new Date()) {
     if (["cancelled", "expired"].includes(m.status)) return m.status;
     if (m.end_date && new Date(`${m.end_date}T23:59:59`) < now) return "expired";
@@ -229,6 +234,17 @@
     return result;
   }
 
+  async function queryCoworkDaypasses() {
+    let result = await supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false });
+    if (result.error && isMissingSchemaError(result.error)) {
+      schemaSupport.coworkDaypassFinance = false;
+      result = await supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false });
+    } else if (!result.error) {
+      schemaSupport.coworkDaypassFinance = true;
+    }
+    return result;
+  }
+
   async function queryTasks(options = {}) {
     const { excludeRejected = false, pendingOnly = false, orderCreatedDesc = false, all = false } = options;
     let q = supabase.from("tasks").select("*").eq("company_id", profile.company_id);
@@ -260,7 +276,7 @@
     const [{ data: reservations, error: er }, { data: members, error: em }, { data: passes, error: ep }, { data: tasks, error: et }] = await Promise.all([
       supabase.from("reservations").select("*").eq("company_id", profile.company_id).lt("start_at", to.toISOString()).gt("end_at", from.toISOString()).order("start_at"),
       queryCoworkMembers(),
-      supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).gte("date", ymd(from)).lte("date", ymd(to)).order("date", { ascending: false }),
+      queryCoworkDaypasses().then((result) => ({ ...result, data: (result.data || []).filter((p) => p.date >= ymd(from) && p.date <= ymd(to)) })),
       queryTasks({ excludeRejected: true, all: true })
     ]);
     if (er) throw er; if (em) throw em; if (ep) throw ep; if (et) throw et;
@@ -281,7 +297,7 @@
     const reservationRevenue = rows.reduce((a, r) => a + Number(r.total_price || 0), 0);
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
     const coworkPaymentsMonth = canSeeOperationalDashboard() ? members.flatMap((m) => m.cowork_payments || []).filter((p) => new Date(p.payment_date) >= monthStart) : [];
-    const coworkRevenue = coworkPaymentsMonth.reduce((a, p) => a + Number(p.amount || 0), 0) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
+    const coworkRevenue = (schemaSupport.coworkPayments ? coworkPaymentsMonth.reduce((a, p) => a + Number(p.amount || 0), 0) : members.reduce((a, m) => a + Number(m.amount_paid || 0), 0)) + daypassesToday.reduce((a, p) => a + Number(p.amount_paid || 0), 0);
     const pendingTasks = tasks.filter((t) => t.approval_status === "pending").length;
 
     el("dashMetrics").innerHTML = [
@@ -374,10 +390,14 @@
     if (!canSeeOperationalDashboard()) { message("coworkMsg", "Área reservada a administradores e gestores."); return; }
     const [{ data: members, error: e1 }, { data: passes, error: e2 }] = await Promise.all([
       queryCoworkMembers(),
-      supabase.from("cowork_daypasses").select("*").eq("company_id", profile.company_id).order("date", { ascending: false })
+      queryCoworkDaypasses()
     ]);
     if (e1) throw e1; if (e2) throw e2;
-    el("membersList").innerHTML = (members || []).map((m) => `<div class="item"><div><div class="item-title">${html(m.name)} ${statusBadge(memberComputedStatus(m), memberComputedStatus(m) === "overdue" ? "warn" : memberComputedStatus(m) === "active" ? "ok" : "bad")}</div><div class="item-meta">Plano ${html(m.plan)} • pagamento ${html(m.payment_type || "mensal")} • pago ${money(m.amount_paid)} • saldo ${money(memberBalance(m))} • próxima cobrança ${m.next_payment_date || "—"}</div></div><button class="btn sm" data-edit-member="${m.id}">Perfil</button></div>`).join("") || '<p class="muted">Sem membros.</p>';
+    const migrationWarnings = [];
+    if (!schemaSupport.coworkPayments) migrationWarnings.push("pagamentos detalhados ainda indisponíveis; a usar valores legados dos membros");
+    if (!schemaSupport.coworkDaypassFinance) migrationWarnings.push("metadados financeiros das diárias ainda indisponíveis");
+    message("coworkMsg", migrationWarnings.length ? `Migração financeira ainda não aplicada: ${migrationWarnings.join("; ")}.` : "—");
+    el("membersList").innerHTML = (members || []).map((m) => `<div class="item"><div><div class="item-title">${html(m.name)} ${statusBadge(memberComputedStatus(m), memberComputedStatus(m) === "overdue" ? "warn" : memberComputedStatus(m) === "active" ? "ok" : "bad")}</div><div class="item-meta">Plano ${html(m.plan)} • pagamento ${html(m.payment_type || "mensal")} • pago ${money(memberPaidTotal(m))}${schemaSupport.coworkPayments ? "" : " (legado)"} • saldo ${money(memberBalance(m))} • próxima cobrança ${m.next_payment_date || "—"}</div></div><button class="btn sm" data-edit-member="${m.id}">Perfil</button></div>`).join("") || '<p class="muted">Sem membros.</p>';
     document.querySelectorAll("[data-edit-member]").forEach((b) => b.onclick = () => openMember(b.dataset.editMember));
     el("daypassList").innerHTML = (passes || []).map((p) => `<div class="item"><div><div class="item-title">${html(p.client_name)}</div><div class="item-meta">${p.date} • ${money(p.amount_paid)}</div></div></div>`).join("") || '<p class="muted">Sem diárias.</p>';
   }
@@ -385,18 +405,18 @@
   async function openMember(id = "") {
     el("memberId").value = id; message("memberMsg", "—");
     if (!id) { ["memberName", "memberStart", "memberEnd", "memberTotal", "memberAmount", "memberNext", "paymentAmount", "paymentReference", "paymentNotes"].forEach((x) => el(x).value = ""); el("memberPlan").value = "monthly"; el("memberPaymentType").value = "monthly"; el("memberStatus").value = "active"; el("memberPaymentsList").innerHTML = '<p class="muted">Guarde o membro para registar pagamentos.</p>'; }
-    else { let { data, error } = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("id", id).single(); if (error && isMissingSchemaError(error)) { schemaSupport.coworkPayments = false; const fallback = await supabase.from("cowork_members").select("*").eq("id", id).single(); data = fallback.data; error = fallback.error; } if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberPaymentType").value = data.payment_type || "monthly"; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberTotal").value = data.total_value || 0; el("memberAmount").value = data.amount_paid; el("memberNext").value = data.next_payment_date || ""; el("memberStatus").value = memberComputedStatus(data); el("memberPaymentsList").innerHTML = (data.cowork_payments || []).sort((a,b) => new Date(b.payment_date) - new Date(a.payment_date)).map((p) => `<div class="item compact"><div><div class="item-title">${money(p.amount)} • ${html(p.payment_method || "—")}</div><div class="item-meta">${p.payment_date} • ${html(p.reference || "sem referência")} • ${html(p.notes || "")}</div></div></div>`).join("") || '<p class="muted">Sem pagamentos registados.</p>'; }
+    else { let { data, error } = await supabase.from("cowork_members").select("*, cowork_payments(*)").eq("id", id).single(); if (error && isMissingSchemaError(error)) { schemaSupport.coworkPayments = false; const fallback = await supabase.from("cowork_members").select("*").eq("id", id).single(); data = fallback.data; error = fallback.error; } if (error) throw error; el("memberName").value = data.name; el("memberPlan").value = data.plan; el("memberPaymentType").value = data.payment_type || "monthly"; el("memberStart").value = data.start_date || ""; el("memberEnd").value = data.end_date || ""; el("memberTotal").value = data.total_value || 0; el("memberAmount").value = memberPaidTotal(data); el("memberNext").value = data.next_payment_date || ""; el("memberStatus").value = memberComputedStatus(data); el("memberPaymentsList").innerHTML = (data.cowork_payments || []).sort((a,b) => new Date(b.payment_date) - new Date(a.payment_date)).map((p) => `<div class="item compact"><div><div class="item-title">${money(p.amount)} • ${html(p.payment_method || "—")}</div><div class="item-meta">${p.payment_date} • ${html(p.reference || "sem referência")} • ${html(p.notes || "")}</div></div></div>`).join("") || '<p class="muted">Sem pagamentos registados.</p>'; }
     openModal("memberModal");
   }
 
   async function saveMember() {
     const id = el("memberId").value;
-    const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value, payment_type: el("memberPaymentType").value, start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, total_value: Number(el("memberTotal").value || 0), amount_paid: Number(el("memberAmount").value || 0), next_payment_date: el("memberNext").value || null, status: el("memberStatus").value };
+    const payload = { company_id: profile.company_id, name: el("memberName").value.trim(), plan: el("memberPlan").value, payment_type: el("memberPaymentType").value, start_date: el("memberStart").value || null, end_date: el("memberEnd").value || null, total_value: Number(el("memberTotal").value || 0), next_payment_date: el("memberNext").value || null, status: el("memberStatus").value };
     if (!payload.name) throw new Error("Nome obrigatório.");
     let result = id ? await supabase.from("cowork_members").update(payload).eq("id", id) : await supabase.from("cowork_members").insert(payload);
     if (result.error && isMissingSchemaError(result.error)) {
       const legacyStatus = { expired: "ended", cancelled: "inactive", pending: "active", overdue: "active" }[payload.status] || payload.status;
-      const legacyPayload = { company_id: payload.company_id, name: payload.name, plan: payload.plan, start_date: payload.start_date, end_date: payload.end_date, amount_paid: payload.amount_paid, status: legacyStatus };
+      const legacyPayload = { company_id: payload.company_id, name: payload.name, plan: payload.plan, start_date: payload.start_date, end_date: payload.end_date, amount_paid: Number(el("memberAmount").value || 0), status: legacyStatus };
       result = id ? await supabase.from("cowork_members").update(legacyPayload).eq("id", id) : await supabase.from("cowork_members").insert(legacyPayload);
     }
     if (result.error) throw result.error;
@@ -415,15 +435,23 @@
       if (error && isMissingSchemaError(error)) schemaSupport.coworkPayments = false;
       else if (error) throw error;
     }
-    const { error: updateError } = await supabase.from("cowork_members").update({ amount_paid: Number(member.amount_paid || 0) + amount }).eq("id", memberId);
-    if (updateError) throw updateError;
+    if (!schemaSupport.coworkPayments) {
+      message("memberMsg", "Migração financeira ainda não aplicada; a usar valor legado do membro como fallback controlado.");
+      const { error: updateError } = await supabase.from("cowork_members").update({ amount_paid: Number(member.amount_paid || 0) + amount }).eq("id", memberId);
+      if (updateError) throw updateError;
+    }
     await openMember(memberId); await renderCowork(); await renderDashboard();
   }
 
   async function addDaypass() {
-    const payload = { company_id: profile.company_id, client_name: el("daypassName").value.trim(), date: el("daypassDate").value || ymd(new Date()), amount_paid: Number(el("daypassAmount").value || 0) };
+    const payload = { company_id: profile.company_id, client_name: el("daypassName").value.trim(), date: el("daypassDate").value || ymd(new Date()), amount_paid: Number(el("daypassAmount").value || 0), payment_method: "cash", reference: "", notes: "", created_by: currentUserId() };
     if (!payload.client_name) throw new Error("Nome do cliente obrigatório.");
-    const { error } = await supabase.from("cowork_daypasses").insert(payload);
+    let { error } = await supabase.from("cowork_daypasses").insert(payload);
+    if (error && isMissingSchemaError(error)) {
+      schemaSupport.coworkDaypassFinance = false;
+      const { payment_method, reference, notes, created_by, ...legacyPayload } = payload;
+      ({ error } = await supabase.from("cowork_daypasses").insert(legacyPayload));
+    }
     if (error) throw error;
     el("daypassName").value = ""; el("daypassAmount").value = ""; await renderCowork();
   }
@@ -529,7 +557,7 @@
       ["H. Outras receitas", []]
     ]);
     rows.forEach((r) => categories.get(resourceCategoryName(r.resource_id)).push({ date: fmt(r.start_at), client: r.client_name, service: resourceName(r.resource_id), period: `${fmt(r.start_at)} → ${fmt(r.end_at)}`, status: r.status, amount: Number(r.total_price || 0) }));
-    members.filter((m) => memberComputedStatus(m) !== "cancelled").forEach((m) => categories.get("E. Cowork — membros").push({ date: m.start_date || "—", client: m.name, service: `Plano ${m.plan} / ${m.payment_type || "mensal"}`, period: `${m.start_date || "—"} → ${m.end_date || "—"}`, status: memberComputedStatus(m), amount: Number(m.amount_paid || 0) }));
+    members.filter((m) => memberComputedStatus(m) !== "cancelled").forEach((m) => categories.get("E. Cowork — membros").push({ date: m.start_date || "—", client: m.name, service: `Plano ${m.plan} / ${m.payment_type || "mensal"}`, period: `${m.start_date || "—"} → ${m.end_date || "—"}`, status: memberComputedStatus(m), amount: memberPaidTotal(m) }));
     passes.forEach((p) => categories.get("F. Cowork — daypasses").push({ date: p.date, client: p.client_name, service: "Daypass cowork", period: p.date, status: "pago", amount: Number(p.amount_paid || 0) }));
     const allLines = [...categories.values()].flat();
     const total = allLines.reduce((a, r) => a + r.amount, 0);
